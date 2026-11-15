@@ -1025,14 +1025,13 @@
   // 参考图里黑色是整颗眼，白是嵌在正中的眼球；颜色一个没换，换的是谁包着谁
   var FACE = {
     ex: 0.31,    // 眼睛横向偏移（× r）
-    ey: -0.145,  // 眼睛纵向偏移
+    ey: -0.07,   // 眼睛纵向偏移（没有嘴了，眼睛要往下挪回视觉中心）
     rx: 0.165,   // 眼半宽
     ry: 0.24,    // 眼半高（竖椭圆，高宽比 1.45）
-    wx: 0.54,    // 白眼球半宽（相对眼半宽）—— 越小黑边越厚
-    wy: 0.62,    // 白眼球半高
-    mx: 0.19,    // 嘴半宽
-    my: 0.395,   // 嘴的中线（笑与沮丧以这条线为轴，不是以两个嘴角为轴）
-    mw: 0.044    // 嘴的线宽
+    wx: 0.44,    // 白眼球半宽（相对眼半宽）—— 越小黑边越厚
+    wy: 0.52,    // 白眼球半高
+    tx: 1.00,    // 白眼球横向行程（1 = 正好顶到黑边，黑边被压成背侧一片弯月）
+    ty: 0.85     // 白眼球纵向行程
   };
 
   // 眼：眼形本身就是裁切区——先裁竖椭圆，攻击态再交上一个半平面，
@@ -1067,12 +1066,14 @@
     ctx.fillStyle = "rgba(8,17,30," + alpha + ")";
     ctx.fillRect(-rx * 1.4, -ry * 1.4, rx * 2.8, ry * 2.8);
 
-    // 白眼球：居中，只随视线轻轻偏，绝对不出黑边
+    // 白眼球：跟着视线走。行程 1.00/0.85——看定一个方向时白球顶到眼眶内壁，
+    // 黑边被压成背侧一片弯月、不再围成一圈，那才读作"在看某个方向"，
+    // 而不是一颗钉在正中的珠子
     var wrx = rx * FACE.wx, wry = ry * FACE.wy;
     ctx.beginPath();
     ctx.ellipse(
-      clamp(lx, -1, 1) * (rx - wrx) * 0.30,
-      clamp(ly, -1, 1) * (ry - wry) * 0.30,
+      clamp(lx, -1, 1) * (rx - wrx) * FACE.tx,
+      clamp(ly, -1, 1) * (ry - wry) * FACE.ty,
       wrx, wry, 0, 0, Math.PI * 2
     );
     ctx.fillStyle = "rgba(238,252,255," + alpha + ")";
@@ -1081,37 +1082,19 @@
     ctx.restore();
   }
 
-  // 嘴：两端上下摆动、中间钉在中线上。
-  // 以嘴角为轴时，沮丧要把中间往上顶，整条嘴就往眼睛那边挤；以中间为轴，
-  // 换表情时嘴的视觉位置不动，只是两个嘴角上下翻。
-  function drawMouth(r, mood, alpha) {
-    var w = r * FACE.mx;
-    var yMid = r * FACE.my;
-    var dip = mood === "up" ? r * 0.13 : -r * 0.13;
-    var yEnd = yMid - dip;
-
-    ctx.beginPath();
-    ctx.moveTo(-w, yEnd);
-    ctx.quadraticCurveTo(0, yMid + dip, w, yEnd);
-    ctx.lineWidth = Math.max(1.4, r * FACE.mw);
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(8,17,30," + alpha + ")";
-    ctx.stroke();
-  }
-
+  // 只有眼睛，没有嘴。三种状态全落在眼形上：
+  // calm 平静 / sad 内眼角上挑 / angry 内上角被斜切
   function drawFace(r, eye, alpha) {
-    var mood = (eye && eye.mood) || "up";
-    var lx = eye ? eye.x : 0, ly = eye ? eye.y : 0;
-    var down = mood === "down" || mood === "angry";
-    var cut = mood === "angry";                   // 只有攻击态切眼
-    var tilt = mood === "down" ? 0.17 : 0;        // 只是不好受 -> 内眼角上挑
-    var k = down ? 0.90 : 1;
+    var mood = (eye && eye.mood) || "calm";
+    var cut = mood === "angry";
+    var tilt = mood === "sad" ? 0.17 : 0;
+    var k = mood === "calm" ? 1 : 0.90;
     var rx = r * FACE.rx, ry = r * FACE.ry * k;
     var ox = r * FACE.ex, oy = r * FACE.ey;
+    var lx = eye ? eye.x : 0, ly = eye ? eye.y : 0;
 
     drawEye(-ox, oy, rx, ry, lx, ly, alpha, 1, cut, tilt);
     drawEye(ox, oy, rx, ry, lx, ly, alpha, -1, cut, -tilt);
-    drawMouth(r, down ? "down" : "up", alpha);
   }
 
   // front = true 时枪画在本体之上、从球的左前方伸出，读作"端着"；
@@ -1169,8 +1152,8 @@
   function drawPlayer(p) {
     var wmx = mouse.x + game.cam.x, wmy = mouse.y + game.cam.y;
     var look = lookAt(p.x, p.y, wmx, wmy);
-    // 嘴只有上下两种；开火时额外把眼的内上角切掉，变成瞪人
-    var mood = p.combat > 0 ? "angry" : (p.hp / p.maxHp <= 0.35 ? "down" : "up");
+    // 没有嘴，情绪全在眼睛上：开火瞪人，血量低内眼角上挑
+    var mood = p.combat > 0 ? "angry" : (p.hp / p.maxHp <= 0.35 ? "sad" : "calm");
     var inv = p.invuln > 0 ? 0.35 : 1;
     drawPawn(p.x, p.y, p.r, p.aim, inv, p.recoil, p.muzzle, WEAPONS[game.weapon].id,
       false, 1, { x: look.x, y: look.y, mood: mood });
@@ -1478,7 +1461,7 @@
 
     drawPawn(cx, cy + bob * hr, hr, HOME_AIM + sway * 0.055, 1, 0, 0,
       WEAPONS[game.weapon].id, true, 1.9,
-      { x: look.x, y: look.y, mood: "up" }, true);
+      { x: look.x, y: look.y, mood: "calm" }, true);
 
     var a = uiById("toEquip"), b = uiById("toMode");
     if (a) drawNavButton(a, "装备选择", "EQUIPMENT", WEAPONS[game.weapon].cn);
