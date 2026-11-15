@@ -885,8 +885,9 @@
     ctx.fillRect(0, 0, W, H);
 
     var step = 64;
-    var ox = ((t * 14 - game.cam.x) % step + step) % step - step;
-    var oy = ((t * 9 - game.cam.y) % step + step) % step - step;
+    // 网格固定不动：不跟时间漂、也不跟镜头走。让地面自己在那儿，别替玩家造速度感
+    var ox = (W / 2) % step;
+    var oy = (H / 2) % step;
     ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -927,95 +928,108 @@
     }
   }
 
-  // 一把圆头圆脑的激光手枪：机身 + 枪管 + 枪口 + 斜握把（+ 步枪的枪托）
-  // 全部用 roundRect 画进同一条路径，先粗描深色再填亮色 —— 外描边是一整块，
-  // 内部接缝被填色盖掉，所以读起来是一把枪，不是几块拼起来的白条
-  // 所有尺寸都乘 r×sc：换个尺寸画，胖瘦比例不变
-  function gunPath(r, id, sc, x0) {
+  // 一把激光枪只有三件东西：机匣、枪管、握把 —— 而且全在**一条轮廓**里。
+  // 机匣是块方肩，枪管细一半、从肩下伸出去，枪口斜切一刀收口；
+  // 三个台阶就是一把枪的全部身份。加圆角会变玩具，加零件会变疙瘩。
+  // 所有尺寸都乘 k = r×sc，换个尺寸胖瘦不变。
+  function gunGeom(r, id, sc, x0) {
     var isR = id === "rifle";
     var k = r * sc;
-    var len = (isR ? 1.45 : 0.95) * k;
-    var H = (isR ? 0.30 : 0.34) * k;       // 机身厚
-    var bw = H * 0.46;                     // 枪管细一半
-    var bodyEnd = x0 + len * (isR ? 0.56 : 0.58);
-    var tipW = len * 0.08;
-    var barEnd = x0 + len - tipW;
-    var gw = H * 0.42, gh = H * 0.92;
-    var gx = x0 + len * (isR ? 0.14 : 0.20);
-
-    ctx.beginPath();
-    ctx.roundRect(x0, -H / 2, bodyEnd - x0, H, H * 0.36);                       // 机身
-    ctx.roundRect(bodyEnd - 3, -bw / 2, barEnd - bodyEnd + 3, bw, bw * 0.48);   // 枪管
-    if (isR) ctx.roundRect(x0 - H * 0.95, -H * 0.30, H * 1.10, H * 0.60, H * 0.24);
-    ctx.save();
-    ctx.translate(gx, H * 0.22);
-    ctx.rotate(0.42);
-    ctx.roundRect(-gw / 2, 0, gw, gh, gw * 0.42);                                // 握把
-    ctx.restore();
+    var len = (isR ? 1.66 : 1.06) * k;
     return {
-      len: len, H: H, bw: bw, bodyEnd: bodyEnd, barEnd: barEnd,
-      tipW: tipW, gx: gx, gw: gw, gh: gh
+      k: k, isR: isR, x0: x0, len: len,
+      H: (isR ? 0.26 : 0.30) * k,       // 机匣高度
+      gw: k * 0.15,                      // 握把宽
+      gh: k * (isR ? 0.36 : 0.33),       // 握把长（约等于机匣高，再长就像站在一根棍上）
+      gx: x0 + len * 0.17
     };
+  }
+
+  // 机身：方肩机匣 → 台阶 → 细枪管 → 收口的枪口。一条闭合路径，一个圆角都不给。
+  // 两个几何函数都不调 beginPath：往同一条路径里追加，共用一次描边，
+  // 接缝处才不会多出一条多余的线。
+  function gunBody(g) {
+    var x0 = g.x0, L = g.len, H = g.H, b = H * 0.28;
+    ctx.moveTo(x0, -H * 0.5);                    // 机匣后上
+    ctx.lineTo(x0 + L * 0.34, -H * 0.5);         // 机匣背
+    ctx.lineTo(x0 + L * 0.34, -b);               // 台阶下到枪管
+    ctx.lineTo(x0 + L * 0.955, -b);              // 枪管顶
+    ctx.lineTo(x0 + L, -b * 0.55);               // 收口：上斜一刀
+    ctx.lineTo(x0 + L, b * 0.55);                // 出光口
+    ctx.lineTo(x0 + L * 0.955, b);               // 下斜一刀
+    ctx.lineTo(x0 + L * 0.34, b);
+    ctx.lineTo(x0 + L * 0.34, H * 0.5);          // 台阶回到机匣底
+    ctx.lineTo(x0 + L * 0.05, H * 0.5);
+    ctx.lineTo(x0, H * 0.26);                    // 后下切角，给握把让位
+    ctx.closePath();
+  }
+
+  // 握把：上宽下窄的一块，向后下方斜插。等宽的话就是一条桌腿
+  function gunGrip(g) {
+    var w = g.gw, h = g.gh;
+    ctx.save();
+    ctx.translate(g.gx, g.H * 0.40);
+    ctx.rotate(0.22);
+    ctx.moveTo(-w * 0.5, 0);
+    ctx.lineTo(w * 0.5, 0);
+    ctx.lineTo(w * 0.30, h);
+    ctx.lineTo(-w * 0.30, h);
+    ctx.closePath();
+    ctx.restore();
   }
 
   // 枪在局部坐标里占的横向范围，给"居中预览"用
   function gunSpan(r, id, sc) {
-    var isR = id === "rifle";
-    var k = r * sc;
-    var x0 = r - 3;
-    var len = (isR ? 1.45 : 0.95) * k;
-    var H = (isR ? 0.30 : 0.34) * k;
-    return { min: x0 - (isR ? H * 0.95 : 0), max: x0 + len };
-  }
-
-  // 握把单独上一档更暗的色，形状才不是一个整块白
-  function gripPath(g) {
-    ctx.beginPath();
-    ctx.save();
-    ctx.translate(g.gx, g.H * 0.22);
-    ctx.rotate(0.42);
-    ctx.roundRect(-g.gw / 2, 0, g.gw, g.gh, g.gw * 0.42);
-    ctx.restore();
+    var g = gunGeom(r, id, sc, r - 3);
+    return { min: g.x0, max: g.x0 + g.len };
   }
 
   function drawGun(r, id, recoil, muzzle, sc, x0) {
     sc = sc || 1;
     if (x0 === undefined) x0 = r - 3 - recoil;
-    var g = gunPath(r, id, sc, x0);
-    var lw = Math.max(1.5, g.H * 0.12);
+    var g = gunGeom(r, id, sc, x0);
+    var L = g.len, H = g.H;
+    var lw = Math.max(0.9, H * 0.07);
 
-    // 一次描粗边、一次填亮色：整把枪共用一条外轮廓，内部接缝被填色盖掉
-    ctx.lineJoin = "round";
+    // 机身与握把一次描边、一次填色：一整条外轮廓，两块之间不会有缝
+    ctx.beginPath();
+    gunBody(g);
+    gunGrip(g);
+    ctx.lineJoin = "miter";
     ctx.strokeStyle = "rgba(6,14,24,0.92)";
     ctx.lineWidth = lw * 2;
     ctx.stroke();
-    ctx.fillStyle = "rgba(212,236,255,1)";
+    ctx.fillStyle = "rgba(216,240,255,1)";
     ctx.fill();
 
-    gripPath(g);
-    ctx.fillStyle = "rgba(138,180,214,1)";
+    // 握把压暗一档，不然整把枪是一块白
+    ctx.beginPath();
+    gunGrip(g);
+    ctx.fillStyle = "rgba(112,152,192,1)";
     ctx.fill();
 
-    // 能量槽：机身中段一条青色光条
-    ctx.beginPath();
-    ctx.roundRect(x0 + g.len * 0.14, -g.H * 0.13, g.len * 0.30, g.H * 0.26, g.H * 0.13);
-    ctx.fillStyle = "rgba(124,231,255,0.92)";
-    ctx.fill();
+    // 瞄轨：只有步枪有，一小块骑在机匣背上——两把枪的差别就靠它
+    if (g.isR) {
+      ctx.beginPath();
+      ctx.rect(g.x0 + L * 0.08, -H * 0.5 - H * 0.20, L * 0.20, H * 0.20);
+      ctx.lineJoin = "miter";
+      ctx.strokeStyle = "rgba(6,14,24,0.92)";
+      ctx.lineWidth = lw * 1.6;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(146,186,220,1)";
+      ctx.fill();
+    }
 
-    // 亮口：藏在枪管末端里的一颗发光点，不外凸
-    var ex = g.barEnd - g.bw * 0.55;
-    ctx.beginPath();
-    ctx.arc(ex, 0, g.bw * 0.44, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(124,231,255,0.55)";
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(ex, 0, g.bw * 0.25, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(255,255,255,0.95)";
-    ctx.fill();
+    // 能量线：沿枪管中线一条，最后一截提亮，像光正往出光口走
+    var sh = Math.max(1, H * 0.09);
+    ctx.fillStyle = "rgba(124,231,255,0.95)";
+    ctx.fillRect(g.x0 + L * 0.40, -sh / 2, L * 0.34, sh);
+    ctx.fillStyle = "rgba(230,252,255,1)";
+    ctx.fillRect(g.x0 + L * 0.80, -sh * 0.9, L * 0.17, sh * 1.8);
 
     if (muzzle > 0) {
       ctx.beginPath();
-      ctx.arc(x0 + g.len, 0, 7 + muzzle * 60, 0, Math.PI * 2);
+      ctx.arc(g.x0 + L, 0, 6 + muzzle * 56, 0, Math.PI * 2);
       ctx.fillStyle = "rgba(200,245,255,0.85)";
       ctx.fill();
     }
@@ -1167,6 +1181,29 @@
     }
   }
 
+  // 敌人也长眼睛，但只有一对"死鱼眼"：白眼球里不是瞳孔，是一个 ×。
+  // 呆滞感全靠这个叉——有眼睛，却不看任何地方：不追玩家，不眨眼，也不左右转。
+  function drawEnemyEye(r, sx, sy) {
+    var rx = Math.max(2.3, r * 0.21), ry = rx * 1.12;
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(248,252,255,0.95)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(8,14,24,0.72)";
+    ctx.lineWidth = Math.max(0.9, rx * 0.24);
+    ctx.stroke();
+
+    var ax = rx * 0.52, ay = ry * 0.52;
+    ctx.beginPath();
+    ctx.moveTo(sx - ax, sy - ay);
+    ctx.lineTo(sx + ax, sy + ay);
+    ctx.moveTo(sx + ax, sy - ay);
+    ctx.lineTo(sx - ax, sy + ay);
+    ctx.strokeStyle = "rgba(12,20,32,0.95)";
+    ctx.lineWidth = Math.max(1, rx * 0.44);
+    ctx.stroke();
+  }
+
   function drawEnemy(e) {
     var sc = e.emerge > 0 ? 1 - (e.emerge / 0.45) * 0.6 : 1;
     var al = e.emerge > 0 ? 1 - (e.emerge / 0.45) * 0.55 : 1;
@@ -1191,6 +1228,9 @@
     ctx.lineWidth = 2;
     ctx.strokeStyle = "rgba(255,255,255,0.22)";
     ctx.stroke();
+
+    drawEnemyEye(e.r, -e.r * 0.33, -e.r * 0.06);
+    drawEnemyEye(e.r, e.r * 0.33, -e.r * 0.06);
 
     if (e.hp < e.maxHp) {
       var w = e.r * 2;
