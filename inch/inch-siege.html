@@ -188,12 +188,13 @@
     for (var i = 0; i < count; i++) {
       var a = rand(0, Math.PI * 2);
       var s = rand(0.2, 1) * power;
+      var life = rand(0.25, 0.7);
       game.particles.push({
         x: x, y: y,
         vx: Math.cos(a) * s,
         vy: Math.sin(a) * s,
-        life: rand(0.25, 0.7),
-        maxLife: 0.7,
+        life: life,
+        maxLife: life,
         size: rand(1.5, 3.6),
         color: color
       });
@@ -232,7 +233,7 @@
     var p = game.player;
     game.timeAlive += dt;
     game.shake = Math.max(0, game.shake - dt * 26);
-    game.hitFlash = Math.max(0, game.hitFlash - dt * 2.4);
+    game.hitFlash = Math.max(0, game.hitFlash - dt);
     game.bannerTime = Math.max(0, game.bannerTime - dt);
 
     // 瞄准
@@ -246,7 +247,7 @@
 
     // 冲刺
     p.dashCd = Math.max(0, p.dashCd - dt);
-    if (keys["ShiftLeft"] && p.dashCd <= 0 && p.dashTime <= 0 && len > 0) {
+    if ((keys["ShiftLeft"] || keys["ShiftRight"]) && p.dashCd <= 0 && p.dashTime <= 0 && len > 0) {
       p.dashTime = 0.15;
       p.dashCd = 1.25;
       p.dashDirX = mx; p.dashDirY = my;
@@ -323,7 +324,7 @@
 
       // 接触伤害
       var rr = e.r + game.player.r;
-      if (dist2(e.x, e.y, px, py) < rr * rr && e.hitCd <= 0 && game.player.invuln <= 0) {
+      if (dist2(e.x, e.y, px, py) < rr * rr && e.hitCd <= 0 && game.player.invuln <= 0 && game.player.dashTime <= 0) {
         game.player.hp -= e.dmg;
         game.player.invuln = 0.55;
         e.hitCd = 0.7;
@@ -445,8 +446,14 @@
 
     // 落地阴影
     ctx.beginPath();
-    ctx.arc(0, 4, p.r + 3, 0, Math.PI * 2);
+    ctx.arc(0, 4, p.r + 2, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fill();
+
+    // 光环
+    ctx.beginPath();
+    ctx.arc(0, 0, p.r + 6, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(124,231,255,0.14)";
     ctx.fill();
 
     var bodyAlpha = p.invuln > 0 ? 0.35 : 1;
@@ -528,6 +535,11 @@
       ctx.fillRect(-w / 2, -e.r - 9, w, 4);
       ctx.fillStyle = "#ff5b5b";
       ctx.fillRect(-w / 2, -e.r - 9, w * (e.hp / e.maxHp), 4);
+      if (e.r > 20) {
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-w / 2 - 0.5, -e.r - 9.5, w + 1, 5);
+      }
     }
     ctx.restore();
   }
@@ -550,7 +562,7 @@
     ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
 
     ctx.font = "600 12px ui-monospace, Consolas, monospace";
-    ctx.fillStyle = "rgba(230,245,255,0.85)";
+    ctx.fillStyle = "rgba(180,205,230,0.7)";
     ctx.textAlign = "left";
     ctx.fillText("HP " + Math.max(0, Math.ceil(p.hp)) + " / " + p.maxHp, bx, by + bh + 18);
 
@@ -561,7 +573,7 @@
     ctx.fillText(String(game.score).padStart(5, "0"), W - 24, 46);
     ctx.font = "500 12px ui-monospace, Consolas, monospace";
     ctx.fillStyle = "rgba(180,205,230,0.7)";
-    ctx.fillText("WAVE " + game.wave + "   KILLS " + game.kills, W - 24, 66);
+    ctx.fillText("WAVE " + String(game.wave).padStart(2, "0") + "   KILLS " + game.kills, W - 24, 66);
 
     // 准星
     ctx.save();
@@ -588,10 +600,10 @@
       ctx.globalAlpha = a;
       ctx.textAlign = "center";
       ctx.font = "800 52px ui-monospace, Consolas, monospace";
-      ctx.fillStyle = "rgba(235,250,255,0.95)";
+      ctx.fillStyle = "#eaf6ff";
       ctx.fillText(game.banner, W / 2, H * 0.24);
       ctx.font = "500 13px ui-monospace, Consolas, monospace";
-      ctx.fillStyle = "rgba(150,200,235,0.8)";
+      ctx.fillStyle = "rgba(150,200,235,0.85)";
       ctx.fillText("ENEMIES INCOMING", W / 2, H * 0.24 + 26);
       ctx.restore();
     }
@@ -604,7 +616,9 @@
       ctx.textAlign = "center";
       ctx.fillStyle = "#eef8ff";
       ctx.font = "800 62px ui-monospace, Consolas, monospace";
-      ctx.fillText("围 城", W / 2, H / 2 - 60);
+      ctx.letterSpacing = "0.12em";
+      ctx.fillText("围城", W / 2 + 4, H / 2 - 60);
+      ctx.letterSpacing = "0px";
       ctx.font = "500 15px ui-monospace, Consolas, monospace";
       ctx.fillStyle = "rgba(160,205,240,0.85)";
       ctx.fillText("WASD 移动 · 鼠标瞄准 · 左键射击 · Shift 冲刺 · Esc 暂停", W / 2, H / 2 - 14);
@@ -630,7 +644,7 @@
       ctx.textAlign = "center";
       ctx.fillStyle = "#ff6b6b";
       ctx.font = "800 56px ui-monospace, Consolas, monospace";
-      ctx.fillText("阵 亡", W / 2, H / 2 - 70);
+      ctx.fillText("阵　亡", W / 2, H / 2 - 70);
 
       ctx.fillStyle = "#eef8ff";
       ctx.font = "700 30px ui-monospace, Consolas, monospace";

@@ -1,0 +1,824 @@
+<!-- INCH · BREACH / v1.0 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方寸 · 断桥</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #05070c; }
+  body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; cursor: none; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+  "use strict";
+
+  // ---------- 常量与色板 ----------
+  var C = {
+    bg0: "#101728", bg1: "#0a0e18", bg2: "#05070c",
+    grid: "rgba(90,130,190,0.075)",
+    player: "#7ce7ff",
+    threat: "#ff5b5b",
+    text: "#eaf6ff",
+    text2: "rgba(180,205,230,0.7)",
+    panel: "rgba(255,255,255,0.09)",
+    line: "rgba(255,255,255,0.18)",
+    mono: 'ui-monospace, Consolas, monospace'
+  };
+
+  var BRIDGE_RATIO = 0.9, BRIDGE_H = 60, SLOTS = 10;
+  var START_PARTS = 5, KILL_PARTS = 1, WAVE_PARTS = 2;
+  var GUN_COST = 3, GUN_RANGE = 180, GUN_CD = 0.5, GUN_DMG = 10;      // 20 DPS
+  var SLOW_COST = 2, SLOW_RANGE = 120, SLOW_PCT = 0.45, SLOW_TIME = 2.0;
+  var MINE_COST = 4, MINE_DMG = 80, MINE_RADIUS = 50;
+  var ENEMY_HP = 40, ENEMY_R = 13;
+  var WAVES = 12, ARMOR_WAVE = 8, ARMOR_CUT = 0.7;
+  var SPAN = 5;
+  var WAVE_GAP = 2.0, FIRST_DELAY = 0.9;
+  var TOOL_SIZE = 56, TOOL_GAP = 12;
+
+  var TOOLS = [
+    { key: "gun", cost: GUN_COST },
+    { key: "slow", cost: SLOW_COST },
+    { key: "mine", cost: MINE_COST }
+  ];
+
+  // ---------- 工具 ----------
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function dist2(ax, ay, bx, by) { var dx = ax - bx, dy = ay - by; return dx * dx + dy * dy; }
+
+  // ---------- 画布与 DPR ----------
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------- 输入 ----------
+  var keys = Object.create(null);
+  var mouse = { x: 0, y: 0 };
+
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code.indexOf("Arrow") === 0) e.preventDefault();
+    keys[e.code] = true;
+    if (e.code === "Escape") { togglePause(); return; }
+    if (e.code === "KeyR" && game.state === "over") { reset(); return; }
+    if ((e.code === "Enter" || e.code === "Space") && game.state === "menu") { reset(); return; }
+    if (game.state === "playing") {
+      if (e.code === "Digit1") game.tool = 0;
+      if (e.code === "Digit2") game.tool = 1;
+      if (e.code === "Digit3") game.tool = 2;
+    }
+  });
+  window.addEventListener("keyup", function (e) { keys[e.code] = false; });
+  window.addEventListener("blur", function () { keys = Object.create(null); });
+
+  canvas.addEventListener("mousemove", function (e) { mouse.x = e.clientX; mouse.y = e.clientY; });
+  canvas.addEventListener("mousedown", function (e) {
+    if (e.button !== 0) return;
+    if (game.state === "menu" || game.state === "over") { reset(); return; }
+    if (game.state !== "playing") return;
+
+    var t = toolHit(mouse.x, mouse.y);
+    if (t >= 0) { game.tool = t; return; }
+
+    var s = slotHit(mouse.x, mouse.y);
+    if (s >= 0) place(s);
+  });
+  canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  // ---------- 状态对象 ----------
+  var game = {
+    state: "menu",
+    tool: 0,
+    parts: START_PARTS,
+    towers: [],
+    enemies: [],
+    ripples: [],
+    particles: [],
+    burstFx: [],
+    span: SPAN,
+    score: 0,
+    kills: 0,
+    wave: 0,
+    waveDelay: FIRST_DELAY,
+    spawnLeft: 0,
+    spawnTimer: 0,
+    banner: "",
+    bannerTime: 0,
+    shake: 0,
+    hitFlash: 0,
+    timeAlive: 0,
+    cleared: 0,
+    clock: 0
+  };
+
+  function bridge() {
+    var w = W * BRIDGE_RATIO;
+    return { x: W / 2 - w / 2, y: H / 2, w: w, h: BRIDGE_H };
+  }
+
+  function slotPos(i) {
+    var b = bridge();
+    return { x: b.x + b.w * (i + 0.5) / SLOTS, y: b.y };
+  }
+
+  function slotHit(mx, my) {
+    var b = bridge();
+    if (mx < b.x || mx > b.x + b.w) return -1;
+    if (Math.abs(my - b.y) > 34) return -1;
+    var i = Math.floor((mx - b.x) / (b.w / SLOTS));
+    return clamp(i, 0, SLOTS - 1);
+  }
+
+  function toolbarRect(i) {
+    var total = TOOLS.length * TOOL_SIZE + (TOOLS.length - 1) * TOOL_GAP;
+    var x0 = W / 2 - total / 2;
+    return { x: x0 + i * (TOOL_SIZE + TOOL_GAP), y: H - 96, w: TOOL_SIZE, h: TOOL_SIZE };
+  }
+
+  function toolHit(mx, my) {
+    for (var i = 0; i < TOOLS.length; i++) {
+      var r = toolbarRect(i);
+      if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) return i;
+    }
+    return -1;
+  }
+
+  function reset() {
+    game.state = "playing";
+    game.tool = 0;
+    game.parts = START_PARTS;
+    game.towers = [];
+    game.enemies = [];
+    game.ripples = [];
+    game.particles = [];
+    game.burstFx = [];
+    game.span = SPAN;
+    game.score = 0;
+    game.kills = 0;
+    game.wave = 0;
+    game.waveDelay = FIRST_DELAY;
+    game.spawnLeft = 0;
+    game.spawnTimer = 0;
+    game.banner = "";
+    game.bannerTime = 0;
+    game.shake = 0;
+    game.hitFlash = 0;
+    game.timeAlive = 0;
+    game.cleared = 0;
+  }
+
+  function togglePause() {
+    if (game.state === "playing") game.state = "paused";
+    else if (game.state === "paused") game.state = "playing";
+  }
+
+  function place(slot) {
+    for (var i = 0; i < game.towers.length; i++) if (game.towers[i].slot === slot) return;
+    var tool = TOOLS[game.tool];
+    if (game.parts < tool.cost) return;
+    game.parts -= tool.cost;
+    var p = slotPos(slot);
+    game.towers.push({
+      slot: slot, type: tool.key, x: p.x, y: p.y,
+      cd: 0, angle: 0, arm: 0, trigger: false
+    });
+    game.shake = Math.min(game.shake + 1.6, 9);
+  }
+
+  // ---------- 特效 ----------
+  function burst(x, y, color, count, power) {
+    for (var i = 0; i < count; i++) {
+      var a = rand(0, Math.PI * 2);
+      var s = rand(0.2, 1) * power;
+      var life = rand(0.25, 0.7);
+      game.particles.push({
+        x: x, y: y,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: life, maxLife: life,
+        size: rand(1.5, 3.6), color: color
+      });
+    }
+  }
+
+  function spawnEnemy() {
+    var b = bridge();
+    var scale = 1 + (game.wave - 1) * 0.17;
+    game.enemies.push({
+      x: b.x - 40,
+      y: b.y + rand(-12, 12),
+      r: ENEMY_R,
+      hp: ENEMY_HP * scale,
+      maxHp: ENEMY_HP * scale,
+      speed: rand(60, 110) * (1 + (game.wave - 1) * 0.02),
+      slow: 0,
+      hurt: 0,
+      ripple: 0
+    });
+  }
+
+  function startWave() {
+    game.wave++;
+    game.spawnLeft = 4 + Math.floor(game.wave * 2.2);
+    game.spawnTimer = 0;
+    game.banner = "第 " + String(game.wave).padStart(2, "0") + " 波";
+    game.bannerTime = 1.6;
+  }
+
+  // ---------- 更新 ----------
+  function update(dt) {
+    game.timeAlive += dt;
+    game.shake = Math.max(0, game.shake - dt * 26);
+    game.hitFlash = Math.max(0, game.hitFlash - dt);
+    game.bannerTime = Math.max(0, game.bannerTime - dt);
+
+    // 波次调度
+    if (game.spawnLeft > 0) {
+      game.spawnTimer -= dt;
+      if (game.spawnTimer <= 0) {
+        spawnEnemy();
+        game.spawnLeft--;
+        game.spawnTimer = rand(0.35, 0.7);
+      }
+    } else if (game.enemies.length === 0) {
+      game.waveDelay -= dt;
+      if (game.waveDelay <= 0) {
+        if (game.wave >= WAVES) { win(); return; }
+        if (game.wave > 0) { game.parts += WAVE_PARTS; game.cleared = game.wave; }
+        startWave();
+        game.waveDelay = WAVE_GAP;
+      }
+    }
+
+    // 塔
+    for (var i = 0; i < game.towers.length; i++) {
+      var t = game.towers[i];
+      t.cd = Math.max(0, t.cd - dt);
+
+      if (t.type === "gun") {
+        var best = null, bd = GUN_RANGE * GUN_RANGE;
+        for (var j = 0; j < game.enemies.length; j++) {
+          var e = game.enemies[j];
+          var d = dist2(t.x, t.y, e.x, e.y);
+          if (d < bd) { bd = d; best = e; }
+        }
+        if (best) {
+          t.angle = Math.atan2(best.y - t.y, best.x - t.x);
+          if (t.cd <= 0) {
+            t.cd = GUN_CD;
+            t.arm = 0.07;
+            damage(best, GUN_DMG);
+            game.burstFx.push({ x: t.x, y: t.y, x2: best.x, y2: best.y, life: 0.06, maxLife: 0.06 });
+          }
+        }
+      } else if (t.type === "slow") {
+        for (var k = 0; k < game.enemies.length; k++) {
+          var se = game.enemies[k];
+          if (dist2(t.x, t.y, se.x, se.y) < SLOW_RANGE * SLOW_RANGE) se.slow = SLOW_TIME;
+        }
+      } else if (t.type === "mine" && !t.trigger) {
+        for (var m = 0; m < game.enemies.length; m++) {
+          if (dist2(t.x, t.y, game.enemies[m].x, game.enemies[m].y) < MINE_RADIUS * MINE_RADIUS) {
+            t.trigger = true;
+            burst(t.x, t.y, "#fff6cf", 16, 260);
+            game.shake = Math.min(game.shake + 4, 14);
+            for (var n = game.enemies.length - 1; n >= 0; n--) {
+              if (dist2(t.x, t.y, game.enemies[n].x, game.enemies[n].y) < MINE_RADIUS * MINE_RADIUS) damage(game.enemies[n], MINE_DMG);
+            }
+            break;
+          }
+        }
+      }
+    }
+    for (var q = game.towers.length - 1; q >= 0; q--) {
+      if (game.towers[q].trigger) game.towers.splice(q, 1);
+    }
+
+    // 敌人
+    var b = bridge();
+    for (var r = game.enemies.length - 1; r >= 0; r--) {
+      var en = game.enemies[r];
+      en.hurt = Math.max(0, en.hurt - dt);
+      en.slow = Math.max(0, en.slow - dt);
+      var sp = en.speed * (en.slow > 0 ? 1 - SLOW_PCT : 1);
+      en.x += sp * dt;
+
+      en.ripple -= dt;
+      if (en.ripple <= 0) {
+        en.ripple = 0.35;
+        game.ripples.push({ x: en.x, y: b.y + 16, life: 1.2, maxLife: 1.2 });
+      }
+
+      if (en.x > b.x + b.w + 30) {
+        game.enemies.splice(r, 1);
+        game.span--;
+        game.shake = Math.min(game.shake + 8, 16);
+        game.hitFlash = 0.6;
+        burst(b.x + b.w, b.y, "#ff4d4d", 14, 220);
+        if (game.span <= 0) { die(); return; }
+      }
+    }
+
+    // 涟漪与特效
+    for (var s = game.ripples.length - 1; s >= 0; s--) {
+      game.ripples[s].life -= dt;
+      if (game.ripples[s].life <= 0) game.ripples.splice(s, 1);
+    }
+    for (var f = game.burstFx.length - 1; f >= 0; f--) {
+      game.burstFx[f].life -= dt;
+      if (game.burstFx[f].life <= 0) game.burstFx.splice(f, 1);
+    }
+    for (var pp = game.particles.length - 1; pp >= 0; pp--) {
+      var pt = game.particles[pp];
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      pt.vx *= Math.pow(0.02, dt);
+      pt.vy *= Math.pow(0.02, dt);
+      pt.life -= dt;
+      if (pt.life <= 0) game.particles.splice(pp, 1);
+    }
+  }
+
+  function damage(enemy, amount) {
+    var dmg = game.wave >= ARMOR_WAVE ? amount * ARMOR_CUT : amount;
+    enemy.hp -= dmg;
+    enemy.hurt = 0.12;
+    game.shake = Math.min(game.shake + 1.6, 9);
+    burst(enemy.x, enemy.y, "#ff9b9b", 5, 150);
+    if (enemy.hp <= 0) {
+      burst(enemy.x, enemy.y, C.threat, 22, 300);
+      burst(enemy.x, enemy.y, "#ffffff", 6, 180);
+      game.shake = Math.min(game.shake + 4, 14);
+      game.kills++;
+      game.parts += KILL_PARTS;
+      game.score += 10;
+      var idx = game.enemies.indexOf(enemy);
+      if (idx >= 0) game.enemies.splice(idx, 1);
+    }
+  }
+
+  function die() {
+    game.state = "over";
+    game.result = "lose";
+    game.shake = 22;
+    var b = bridge();
+    burst(b.x + b.w, b.y, "#ff4d4d", 60, 420);
+    burst(b.x + b.w, b.y, "#ffffff", 20, 260);
+  }
+
+  function win() {
+    game.state = "over";
+    game.result = "win";
+    game.shake = 12;
+    game.score += 50 * WAVES;
+    var b = bridge();
+    burst(b.x + b.w, b.y, C.player, 40, 320);
+  }
+
+  // ---------- 绘制 ----------
+  function drawBackground() {
+    var g = ctx.createRadialGradient(W / 2, H / 2, 60, W / 2, H / 2, Math.max(W, H) * 0.78);
+    g.addColorStop(0, C.bg0);
+    g.addColorStop(0.55, C.bg1);
+    g.addColorStop(1, C.bg2);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    var step = 64;
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var x = 0; x < W + step; x += step) {
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, H);
+    }
+    for (var y = 0; y < H + step; y += step) {
+      ctx.moveTo(0, Math.round(y) + 0.5);
+      ctx.lineTo(W, Math.round(y) + 0.5);
+    }
+    ctx.stroke();
+  }
+
+  function drawBridge() {
+    var b = bridge();
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fillRect(b.x, b.y - b.h / 2, b.w, b.h);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(b.x + 0.5, b.y - b.h / 2 + 0.5, b.w, b.h);
+
+    // 桥头缺口：贴在桥面左端上沿
+    var notchW = 14, notchH = 8;
+    for (var i = 0; i < SPAN; i++) {
+      var nx = b.x + 6 + i * (notchW + 5);
+      var ny = b.y - b.h / 2 - 18;
+      if (i < game.span) {
+        ctx.fillStyle = "rgba(124,231,255,0.30)";
+        ctx.fillRect(nx, ny, notchW, notchH);
+        ctx.strokeStyle = "rgba(124,231,255,0.55)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(nx + 0.5, ny + 0.5, notchW, notchH);
+      } else {
+        ctx.strokeStyle = "rgba(255,91,91,0.45)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(nx + 0.5, ny + 0.5, notchW, notchH);
+      }
+    }
+
+    // 部署格
+    for (var s = 0; s < SLOTS; s++) {
+      var p = slotPos(s);
+      ctx.strokeStyle = "rgba(255,255,255,0.14)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 18, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function drawRipples() {
+    for (var i = 0; i < game.ripples.length; i++) {
+      var r = game.ripples[i];
+      var a = r.life / r.maxLife;
+      ctx.globalAlpha = a * 0.5;
+      ctx.strokeStyle = "rgba(255,91,91,0.5)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, 6 + (1 - a) * 14, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawTowers() {
+    for (var i = 0; i < game.towers.length; i++) {
+      var t = game.towers[i];
+
+      ctx.beginPath();
+      ctx.arc(t.x, t.y + 4, 15, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0,0,0,0.42)";
+      ctx.fill();
+
+      if (t.type === "gun") {
+        ctx.save();
+        ctx.translate(t.x, t.y);
+        ctx.rotate(t.angle);
+        ctx.fillStyle = "rgba(124,231,255,0.9)";
+        ctx.fillRect(0, -2.5, 20, 5);
+        ctx.restore();
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 12, 0, Math.PI * 2);
+        var g = ctx.createRadialGradient(t.x - 3, t.y - 3, 1, t.x, t.y, 13);
+        g.addColorStop(0, "#beeff7");
+        g.addColorStop(1, "#3c96dc");
+        ctx.fillStyle = g;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(150,235,255,0.9)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (t.arm > 0) {
+          ctx.beginPath();
+          ctx.arc(t.x + Math.cos(t.angle) * 22, t.y + Math.sin(t.angle) * 22, 6, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255,235,150,0.85)";
+          ctx.fill();
+          t.arm -= 0.016;
+        }
+      } else if (t.type === "slow") {
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 12, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(124,231,255,0.18)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(150,235,255,0.9)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(150,235,255,0.9)";
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 11, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,246,207,0.25)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,246,207,0.8)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(t.x - 5, t.y);
+        ctx.lineTo(t.x + 5, t.y);
+        ctx.moveTo(t.x, t.y - 5);
+        ctx.lineTo(t.x, t.y + 5);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawEnemies() {
+    for (var i = 0; i < game.enemies.length; i++) {
+      var e = game.enemies[i];
+      ctx.beginPath();
+      ctx.arc(e.x, e.y + 4, e.r + 2, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0,0,0,0.42)";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+      var g = ctx.createRadialGradient(e.x - e.r * 0.3, e.y - e.r * 0.35, 1, e.x, e.y, e.r + 1);
+      g.addColorStop(0, e.hurt > 0 ? "#ffffff" : "#ff9b9b");
+      g.addColorStop(1, e.hurt > 0 ? "#ffffff" : C.threat);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.22)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      if (e.slow > 0) {
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.r + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(124,231,255,0.45)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      if (e.hp < e.maxHp) {
+        var w = e.r * 2;
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(e.x - w / 2, e.y - e.r - 9, w, 4);
+        ctx.fillStyle = C.threat;
+        ctx.fillRect(e.x - w / 2, e.y - e.r - 9, w * (e.hp / e.maxHp), 4);
+      }
+    }
+  }
+
+  function drawBurstFx() {
+    for (var i = 0; i < game.burstFx.length; i++) {
+      var f = game.burstFx[i];
+      ctx.globalAlpha = f.life / f.maxLife;
+      ctx.strokeStyle = "rgba(255,246,207,0.85)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(f.x, f.y);
+      ctx.lineTo(f.x2, f.y2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawToolbar() {
+    for (var i = 0; i < TOOLS.length; i++) {
+      var r = toolbarRect(i);
+      var affordable = game.parts >= TOOLS[i].cost;
+      var selected = game.tool === i;
+
+      ctx.globalAlpha = affordable ? 1 : 0.35;
+      ctx.fillStyle = selected ? "rgba(124,231,255,0.12)" : C.panel;
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.strokeStyle = selected ? C.player : C.line;
+      ctx.lineWidth = selected ? 2 : 1;
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+
+      ctx.save();
+      ctx.translate(r.x + r.w / 2, r.y + r.h / 2 - 4);
+      if (TOOLS[i].key === "gun") {
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.strokeStyle = C.player;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(14, 0);
+        ctx.stroke();
+      } else if (TOOLS[i].key === "slow") {
+        ctx.beginPath();
+        ctx.arc(0, 0, 11, 0, Math.PI * 2);
+        ctx.strokeStyle = C.player;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, 4, 0, Math.PI * 2);
+        ctx.fillStyle = C.player;
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.strokeStyle = "#fff6cf";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-6, 0); ctx.lineTo(6, 0);
+        ctx.moveTo(0, -6); ctx.lineTo(0, 6);
+        ctx.strokeStyle = "#fff6cf";
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.font = "500 11px " + C.mono;
+      ctx.fillStyle = affordable ? C.text : C.text2;
+      ctx.textAlign = "right";
+      ctx.fillText(String(TOOLS[i].cost), r.x + r.w - 6, r.y + r.h - 6);
+      ctx.globalAlpha = 1;
+    }
+
+    // 零件数
+    var last = toolbarRect(TOOLS.length - 1);
+    ctx.textAlign = "left";
+    ctx.font = "700 26px " + C.mono;
+    ctx.fillStyle = C.player;
+    ctx.fillText(String(game.parts), last.x + last.w + 20, last.y + last.h / 2 + 9);
+  }
+
+  function drawHUD() {
+    // 桥面格
+    for (var i = 0; i < SPAN; i++) {
+      var x = 24 + i * 32, y = 27;
+      if (i < game.span) {
+        ctx.fillStyle = C.player;
+        ctx.fillRect(x, y, 24, 14);
+      } else {
+        ctx.fillStyle = "rgba(255,91,91,0.12)";
+        ctx.fillRect(x, y, 24, 14);
+        ctx.strokeStyle = "rgba(255,91,91,0.5)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, 24, 14);
+      }
+    }
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = C.text2;
+    ctx.textAlign = "left";
+    ctx.fillText("SPAN " + Math.max(0, game.span) + " / " + SPAN, 24, 62);
+
+    // 分数
+    ctx.textAlign = "right";
+    ctx.font = "700 26px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(String(game.score).padStart(5, "0"), W - 24, 46);
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = C.text2;
+    ctx.fillText("WAVE " + String(game.wave).padStart(2, "0") + "   KILLS " + game.kills, W - 24, 66);
+
+    // 波次横幅
+    if (game.bannerTime > 0) {
+      var a = Math.min(1, game.bannerTime / 0.4);
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.textAlign = "center";
+      ctx.font = "800 52px " + C.mono;
+      ctx.fillStyle = "#eaf6ff";
+      ctx.fillText(game.banner, W / 2, H * 0.24);
+      ctx.font = "500 13px " + C.mono;
+      ctx.fillStyle = "rgba(150,200,235,0.85)";
+      ctx.fillText("ENEMIES INCOMING", W / 2, H * 0.24 + 26);
+      ctx.restore();
+    }
+
+    // 悬停格提示
+    var s = slotHit(mouse.x, mouse.y);
+    if (s >= 0) {
+      var p = slotPos(s);
+      var occupied = false;
+      for (var k = 0; k < game.towers.length; k++) if (game.towers[k].slot === s) occupied = true;
+      if (!occupied) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 18, 0, Math.PI * 2);
+        ctx.strokeStyle = game.parts >= TOOLS[game.tool].cost ? "rgba(140,235,255,0.9)" : "rgba(255,91,91,0.6)";
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawOverlay() {
+    ctx.textAlign = "center";
+
+    if (game.state === "menu") {
+      ctx.fillStyle = "rgba(5,8,14,0.78)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#eef8ff";
+      ctx.font = "800 62px " + C.mono;
+      ctx.letterSpacing = "0.12em";
+      ctx.fillText("断桥", W / 2 + 4, H / 2 - 60);
+      ctx.letterSpacing = "0px";
+      ctx.font = "500 15px " + C.mono;
+      ctx.fillStyle = "rgba(160,205,240,0.85)";
+      ctx.fillText("左键 部署 · 1 / 2 / 3 切换 · Esc 暂停", W / 2, H / 2 - 14);
+      ctx.font = "600 16px " + C.mono;
+      ctx.fillStyle = "rgba(140,235,255,0.95)";
+      ctx.globalAlpha = 0.55 + Math.sin(game.clock / 0.32) * 0.45;
+      ctx.fillText("点击屏幕开始", W / 2, H / 2 + 44);
+      ctx.globalAlpha = 1;
+    } else if (game.state === "paused") {
+      ctx.fillStyle = "rgba(5,8,14,0.70)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#eef8ff";
+      ctx.font = "800 44px " + C.mono;
+      ctx.fillText("已暂停", W / 2, H / 2 - 6);
+      ctx.font = "500 14px " + C.mono;
+      ctx.fillStyle = "rgba(160,205,240,0.8)";
+      ctx.fillText("按 Esc 继续", W / 2, H / 2 + 28);
+    } else if (game.state === "over") {
+      ctx.fillStyle = "rgba(10,4,6,0.82)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = game.result === "win" ? C.player : "#ff6b6b";
+      ctx.font = "800 56px " + C.mono;
+      ctx.fillText(game.result === "win" ? "守　住" : "阵　亡", W / 2, H / 2 - 70);
+      ctx.fillStyle = "#eef8ff";
+      ctx.font = "700 30px " + C.mono;
+      ctx.fillText("得分 " + game.score, W / 2, H / 2 - 10);
+      ctx.font = "500 14px " + C.mono;
+      ctx.fillStyle = "rgba(170,200,225,0.85)";
+      ctx.fillText("坚守 " + game.wave + " 波 · 击杀 " + game.kills + " · 存活 " + game.timeAlive.toFixed(1) + " 秒", W / 2, H / 2 + 22);
+      ctx.font = "600 16px " + C.mono;
+      ctx.fillStyle = "rgba(140,235,255,0.95)";
+      ctx.globalAlpha = 0.55 + Math.sin(game.clock / 0.32) * 0.45;
+      ctx.fillText("点击或按 R 重新开始", W / 2, H / 2 + 68);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function render() {
+    var sx = 0, sy = 0;
+    if (game.shake > 0.2) {
+      sx = rand(-game.shake, game.shake) * 0.3;
+      sy = rand(-game.shake, game.shake) * 0.3;
+    }
+
+    ctx.save();
+    ctx.translate(sx, sy);
+    drawBackground();
+
+    if (game.state !== "menu") {
+      drawBridge();
+      drawRipples();
+      drawTowers();
+      drawEnemies();
+      drawBurstFx();
+    }
+
+    for (var j = 0; j < game.particles.length; j++) {
+      var pt = game.particles[j];
+      ctx.globalAlpha = clamp(pt.life / pt.maxLife, 0, 1);
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    if (game.state !== "menu" && game.hitFlash > 0) {
+      var vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.25, W / 2, H / 2, Math.max(W, H) * 0.72);
+      vg.addColorStop(0, "rgba(255,0,0,0)");
+      vg.addColorStop(1, "rgba(255,0,0," + (game.hitFlash * 0.45) + ")");
+      ctx.fillStyle = vg;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    var vig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.85);
+    vig.addColorStop(0, "rgba(0,0,0,0)");
+    vig.addColorStop(1, "rgba(0,0,0,0.55)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
+
+    if (game.state !== "menu") {
+      drawHUD();
+      drawToolbar();
+    }
+    drawOverlay();
+  }
+
+  // ---------- 主循环 ----------
+  var last = performance.now();
+
+  function loop(now) {
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    game.clock += dt;
+
+    if (game.state === "playing") update(dt);
+    render();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
