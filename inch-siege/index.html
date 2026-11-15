@@ -1,4 +1,4 @@
-<!-- INCH · SIEGE / v1.2 -->
+<!-- INCH · SIEGE / v1.3 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -48,6 +48,7 @@
     canvas.style.height = H + "px";
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     if (game.state === "menu") { menuLayout(); return; }
+    if (game.state === "paused") { layoutArena(); pauseLayout(); return; }
     layoutArena();
   }
   window.addEventListener("resize", resize);
@@ -79,14 +80,17 @@
   ];
 
   var SAFE_SCALE = 1.5;   // 安全屋地图 = 1.5 屏，视野占 2/3
+  var HOME_AIM = 2.50;    // 首页主角的端枪角度：固定指向左下，不跟鼠标转
 
   var game = {
     state: "menu",
+    screen: "home",          // 初始界面的三页：home / equip / mode
     mode: "classic",
     weapon: 0,
-    focus: 0,
-    hover: -1,
-    cards: [],
+    hoverId: null,
+    pressId: null,
+    pageT: 1,
+    ui: [],
     player: null,
     bullets: [],
     enemies: [],
@@ -119,39 +123,100 @@
       hp: 100, maxHp: 100,
       aim: 0, fireCd: 0, invuln: 0,
       dashCd: 0, dashTime: 0, dashDirX: 0, dashDirY: 0,
-      muzzle: 0, recoil: 0
+      muzzle: 0, recoil: 0,
+      combat: 0                 // 刚开过火的余温：>0 时嘴抿起来
     };
   }
 
-  // ---------- 初始界面 ----------
+  // ---------- 初始界面：三页 ----------
+  // home：标题 + 持枪主角 + 左下「装备选择」+ 右下「模式选择」
+  // equip：两件装备与全部数值
+  // mode：两张模式卡 + 开始游戏 + 底部操作提示
+  // 每页布局都写进 game.ui，鼠标只按 id 派发，不再维护焦点下标
+  var EQ_W = 330, EQ_H = 344;
+  var MD_W = 320, MD_H = 146;
+  var BTN_START_H = 64, BTN_START_GAP = 48;
+
   function menuLayout() {
-    var cw = 180, ch = 62, gap = 18;
-    var wy = H / 2 + 84;
-    var wx = W / 2 - cw - gap / 2;
-    var mx = W - 48 - cw;
-    var my = H - 48 - ch * 2 - gap;
-    game.cards = [
-      { kind: "weapon", idx: 0, x: wx, y: wy, w: cw, h: ch },
-      { kind: "weapon", idx: 1, x: wx + cw + gap, y: wy, w: cw, h: ch },
-      { kind: "mode", idx: 0, x: mx, y: my, w: cw, h: ch },
-      { kind: "mode", idx: 1, x: mx, y: my + ch + gap, w: cw, h: ch }
-    ];
+    var list = [];
+    if (game.screen === "equip") layoutEquip(list);
+    else if (game.screen === "mode") layoutMode(list);
+    else layoutHome(list);
+    game.ui = list;
   }
 
-  function cardAt(x, y) {
-    for (var i = 0; i < game.cards.length; i++) {
-      var c = game.cards[i];
-      if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return i;
+  function layoutHome(list) {
+    var bw = 224, bh = 84, pad = 48;
+    list.push({ id: "toEquip", kind: "nav", target: "equip", x: pad, y: H - pad - bh, w: bw, h: bh });
+    list.push({ id: "toMode", kind: "nav", target: "mode", x: W - pad - bw, y: H - pad - bh, w: bw, h: bh });
+  }
+
+  function layoutEquip(list) {
+    var gap = 24;
+    var x0 = W / 2 - (EQ_W * 2 + gap) / 2;
+    var y0 = clamp(H * 0.52 - EQ_H / 2, 178, Math.max(178, H - EQ_H - 80));
+    list.push({ id: "backHome", kind: "nav", target: "home", x: W - 48 - 104, y: 40, w: 104, h: 42 });
+    list.push({ id: "weapon0", kind: "weapon", idx: 0, x: x0, y: y0, w: EQ_W, h: EQ_H });
+    list.push({ id: "weapon1", kind: "weapon", idx: 1, x: x0 + EQ_W + gap, y: y0, w: EQ_W, h: EQ_H });
+  }
+
+  function layoutMode(list) {
+    var gap = 28;
+    var x0 = W / 2 - (MD_W * 2 + gap) / 2;
+    // 卡片 + 间距 + 按钮作为一个整体居中，而不是只居中卡片
+    var blockH = MD_H + BTN_START_GAP + BTN_START_H;
+    var y0 = H * 0.5 - blockH / 2 - 12;
+    list.push({ id: "backHome", kind: "nav", target: "home", x: W - 48 - 104, y: 40, w: 104, h: 42 });
+    list.push({ id: "mode0", kind: "mode", idx: 0, x: x0, y: y0, w: MD_W, h: MD_H });
+    list.push({ id: "mode1", kind: "mode", idx: 1, x: x0 + MD_W + gap, y: y0, w: MD_W, h: MD_H });
+    list.push({ id: "start", kind: "start", x: W / 2 - 160, y: y0 + MD_H + BTN_START_GAP, w: 320, h: BTN_START_H });
+  }
+
+  // 暂停时只留一个出口：继续按 Esc，退出点这里
+  function pauseLayout() {
+    game.ui = [{ id: "exitRun", kind: "exitRun", x: W / 2 - 92, y: H / 2 + 30, w: 184, h: 46 }];
+  }
+
+  function uiById(id) {
+    for (var i = 0; i < game.ui.length; i++) if (game.ui[i].id === id) return game.ui[i];
+    return null;
+  }
+
+  function hitUi(x, y) {
+    for (var i = 0; i < game.ui.length; i++) {
+      var u = game.ui[i];
+      if (x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h) return u;
     }
-    return -1;
+    return null;
   }
 
-  function pick(i) {
-    var c = game.cards[i];
-    if (!c) return;
-    if (c.kind === "weapon") game.weapon = c.idx;
-    else game.mode = MODES[c.idx].id;
-    game.focus = i;
+  function act(u) {
+    if (!u) return;
+    if (u.kind === "nav") {
+      game.screen = u.target;
+      game.hoverId = null;
+      game.pageT = 0;
+      menuLayout();
+    } else if (u.kind === "weapon") {
+      game.weapon = u.idx;
+    } else if (u.kind === "mode") {
+      game.mode = MODES[u.idx].id;
+    } else if (u.kind === "start") {
+      startRun();
+    } else if (u.kind === "exitRun") {
+      backToMenu();
+    }
+  }
+
+  // 眼球朝鼠标：返回 -1..1 的方向分量；鼠标还没进画面时朝右前，别斜在角上
+  // 60px 内按比例收，是为了"鼠标贴着球"时瞳孔不抖；超过 60px 就顶满——
+  // 对局里瞄近处的敌人时，眼珠必须立刻转过去，不能还慢半拍
+  function lookAt(cx, cy, sx, sy) {
+    if (mouse.x < 0 || mouse.y < 0) return { x: 0.34, y: 0.10 };
+    var dx = sx - cx, dy = sy - cy;
+    var d = Math.hypot(dx, dy) || 1;
+    var k = Math.min(1, d / 60);
+    return { x: (dx / d) * k, y: (dy / d) * k };
   }
 
   // ---------- 安全屋 ----------
@@ -388,6 +453,7 @@
   // ---------- 开局 ----------
   function startRun() {
     game.state = "playing";
+    game.hoverId = null;
     game.player = makePlayer();
     game.bullets = [];
     game.enemies = [];
@@ -434,8 +500,26 @@
   }
 
   function togglePause() {
-    if (game.state === "playing") game.state = "paused";
-    else if (game.state === "paused") game.state = "playing";
+    if (game.state === "playing") {
+      game.state = "paused";
+      game.hoverId = null;
+      game.pressId = null;
+      pauseLayout();
+    } else if (game.state === "paused") {
+      game.state = "playing";
+      game.hoverId = null;
+      game.pressId = null;
+    }
+  }
+
+  function backToMenu() {
+    game.state = "menu";
+    game.screen = "home";
+    game.hoverId = null;
+    game.pressId = null;
+    game.pageT = 0;
+    mouse.down = false;
+    menuLayout();
   }
 
   // ---------- 波次 / 关卡 ----------
@@ -543,6 +627,7 @@
     });
     p.muzzle = 0.07;
     p.recoil = w.kick * 2.2;
+    p.combat = 0.14;
     game.shake = Math.min(game.shake + w.kick, 9);
     burst(mx, my, "#fff6cf", 3, 90);
   }
@@ -614,6 +699,7 @@
     p.invuln = Math.max(0, p.invuln - dt);
     p.muzzle = Math.max(0, p.muzzle - dt);
     p.recoil = Math.max(0, p.recoil - dt * 22);
+    p.combat = Math.max(0, p.combat - dt);
 
     // 开火
     p.fireCd -= dt;
@@ -841,38 +927,150 @@
     }
   }
 
-  // 极简激光枪：机匣（厚）+ 枪管（细）+ 枪口（亮），两段矩形，深色描边
-  function drawGun(r, id, recoil, muzzle, sc) {
-    sc = sc || 1;
+  // 一把枪的剪影：枪托 + 机匣 + 握把 + 枪管 + 枪口 + 瞄具
+  // 所有部件顺时针画进同一条路径，先粗描深色再填亮色 —— 得到一整块 2px 的外描边，
+  // 部件之间的接缝被填色盖掉，所以看起来是一把枪，而不是几块拼起来的白条
+  function gunPath(r, id, sc, x0) {
     var isR = id === "rifle";
-    var x0 = r - 3 - recoil;
     var len = (isR ? r * 1.5 : r * 0.95) * sc;
-    var bw = (isR ? 6 : 7) * sc;
-    var recW = len * 0.42;
-    var recH = (isR ? 13 : 12) * sc;
-    var tipW = 5 * sc;
+    var H = (isR ? 12 : 13) * sc;        // 机匣高
+    var bw = (isR ? 7 : 8) * sc;         // 枪管高
+    var bodyEnd = x0 + len * 0.48;
+    var tipW = 6 * sc;
+    var barEnd = x0 + len - tipW;
+    var gx = x0 + len * (isR ? 0.10 : 0.14);   // 握把前缘
+    var gw = len * 0.12;                        // 握把宽
+    var gh = H * 1.0;                           // 握把长
 
-    ctx.fillStyle = "rgba(6,14,24,0.9)";
-    ctx.fillRect(x0, -recH / 2 - 2, recW + 2, recH + 4);
-    ctx.fillRect(x0 + recW, -bw / 2 - 2, len - recW, bw + 4);
-    ctx.fillStyle = "rgba(206,232,255,1)";
-    ctx.fillRect(x0, -recH / 2, recW, recH);
-    ctx.fillRect(x0 + recW, -bw / 2, len - recW, bw);
-    ctx.fillStyle = "rgba(226,246,255,1)";
-    ctx.fillRect(x0 + len - tipW, -bw / 2 - 2, tipW, bw + 4);
-    if (isR) {
-      ctx.fillStyle = "rgba(206,232,255,0.55)";
-      ctx.fillRect(x0 + recW * 0.3, recH / 2, recW * 0.4, 4 * sc);
+    ctx.beginPath();
+    if (isR) {                                            // 枪托：细长，略向下垂
+      ctx.moveTo(x0 - H * 1.15, -H * 0.30);
+      ctx.lineTo(x0, -H * 0.5);
+      ctx.lineTo(x0, H * 0.5);
+      ctx.lineTo(x0 - H * 1.15, H * 0.62);
+      ctx.closePath();
     }
+    ctx.rect(x0, -H / 2, bodyEnd - x0, H);                // 机匣
+    ctx.moveTo(gx, H / 2 - 1);                            // 握把：向后下方斜
+    ctx.lineTo(gx + gw, H / 2 - 1);
+    ctx.lineTo(gx + gw * 0.35, H / 2 + gh);
+    ctx.lineTo(gx - gw * 0.55, H / 2 + gh);
+    ctx.closePath();
+    ctx.rect(bodyEnd, -bw / 2, barEnd - bodyEnd, bw);     // 枪管
+    ctx.rect(barEnd, -bw * 0.85, tipW, bw * 1.7);         // 枪口
+    ctx.rect(bodyEnd - 9 * sc, -H / 2 - 3 * sc, 5 * sc, 3 * sc);   // 瞄具
+    return { len: len, H: H, bodyEnd: bodyEnd, gx: gx, gw: gw, gh: gh };
+  }
+
+  // 枪在局部坐标里占的横向范围，给"居中预览"用
+  function gunSpan(r, id, sc) {
+    var isR = id === "rifle";
+    var x0 = r - 3;
+    var len = (isR ? r * 1.5 : r * 0.95) * sc;
+    var H = (isR ? 12 : 13) * sc;
+    return { min: x0 - (isR ? H * 1.15 : 0), max: x0 + len };
+  }
+
+  function drawGun(r, id, recoil, muzzle, sc, x0) {
+    sc = sc || 1;
+    if (x0 === undefined) x0 = r - 3 - recoil;
+    var g = gunPath(r, id, sc, x0);
+
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "rgba(6,14,24,0.92)";
+    ctx.lineWidth = 4 * sc;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(207,233,255,1)";
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(124,231,255,0.9)";              // 能量槽
+    ctx.fillRect(x0 + g.len * 0.10, -1.2 * sc, g.len * 0.15, 2.4 * sc);
+    ctx.fillStyle = "rgba(255,255,255,0.30)";             // 机匣与枪管的分模线
+    ctx.fillRect(g.bodyEnd - 2 * sc, -g.H / 2, 2 * sc, g.H);
+
     if (muzzle > 0) {
       ctx.beginPath();
-      ctx.arc(x0 + len, 0, 7 + muzzle * 60, 0, Math.PI * 2);
+      ctx.arc(x0 + g.len, 0, 7 + muzzle * 60, 0, Math.PI * 2);
       ctx.fillStyle = "rgba(200,245,255,0.85)";
       ctx.fill();
     }
   }
 
-  function drawPawn(x, y, r, aim, alpha, recoil, muzzle, weaponId, glow, gsc) {
+  // 一张脸：一对竖椭圆眼 + 一张会变的嘴。参考图是「深色眼 + 白色月牙高光」，
+  // 这里颜色不换（眼白仍浅、眼珠仍深），只把形状搬过来——
+  // 眼珠做大、跟着视线偏出去，另一侧留出的那道月牙就是图里的高光带
+  var FACE = {
+    ex: 0.33,    // 眼睛横向偏移（× r）
+    ey: -0.15,   // 眼睛纵向偏移
+    rx: 0.19,    // 眼白横半径
+    ry: 0.275,   // 眼白纵半径
+    pr: 0.70,    // 眼珠相对眼白的大小
+    po: 0.34,    // 眼珠横向偏移上限（× 眼白横半径）
+    mx: 0.22,    // 嘴半宽
+    my: 0.41,    // 嘴纵位
+    mw: 0.048    // 嘴的线宽
+  };
+
+  // 眼珠比眼白小不了多少，所以不能只在里面挪——它会顶到边界，
+  // 直接用眼白椭圆裁一刀，越界部分自然切掉，月牙的形状才对
+  function drawEye(x, y, rx, ry, lx, ly, alpha, tilt) {
+    ctx.save();
+    ctx.translate(x, y);
+    if (tilt) ctx.rotate(tilt);
+
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(238,252,255," + alpha + ")";
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.ellipse(
+      clamp(lx, -1, 1) * rx * FACE.po,
+      clamp(ly, -1, 1) * ry * 0.12,
+      rx * FACE.pr, ry * FACE.pr, 0, 0, Math.PI * 2
+    );
+    ctx.fillStyle = "rgba(8,17,30," + alpha + ")";
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // 嘴：两端固定、中间上下弯。笑 = 中间下沉，沮丧 = 中间上拱，专注 = 几乎平
+  function drawMouth(r, mood, alpha) {
+    var w = r * FACE.mx;
+    var y0 = r * FACE.my;
+    var dip = mood === "smile" ? r * 0.10 : (mood === "frown" ? -r * 0.16 : 0);
+
+    ctx.beginPath();
+    ctx.moveTo(-w, y0);
+    ctx.quadraticCurveTo(0, y0 + dip * 2, w, y0);
+    ctx.lineWidth = Math.max(1.4, r * FACE.mw);
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(8,17,30," + alpha + ")";
+    ctx.stroke();
+  }
+
+  function drawFace(r, eye, alpha) {
+    var mood = (eye && eye.mood) || "smile";
+    var lx = eye ? eye.x : 0, ly = eye ? eye.y : 0;
+    var tilt = mood === "frown" ? 0.17 : 0;               // 沮丧时内眼角上挑
+    var k = mood === "frown" ? 0.90 : (mood === "flat" ? 0.94 : 1);
+    var rx = r * FACE.rx, ry = r * FACE.ry * k;
+    var ox = r * FACE.ex, oy = r * FACE.ey;
+
+    drawEye(-ox, oy, rx, ry, lx, ly, alpha, tilt);
+    drawEye(ox, oy, rx, ry, lx, ly, alpha, -tilt);
+    drawMouth(r, mood, alpha);
+  }
+
+  // front = true 时枪画在本体之上、从球的左前方伸出，读作"端着"；
+  // 对局中仍用 false，枪托藏在球底下，让球的轮廓保持完整
+  function drawPawn(x, y, r, aim, alpha, recoil, muzzle, weaponId, glow, gsc, eye, front) {
     ctx.save();
     ctx.translate(x, y);
 
@@ -886,10 +1084,16 @@
     ctx.fillStyle = glow ? "rgba(124,231,255,0.18)" : "rgba(124,231,255,0.14)";
     ctx.fill();
 
-    ctx.save();
-    ctx.rotate(aim);
-    drawGun(r, weaponId, recoil, muzzle, gsc);
-    ctx.restore();
+    // 侧视的枪只能靠镜像转身：直接转 180° 会把枪画倒（握把朝上）
+    var flip = Math.cos(aim) < 0 ? -1 : 1;
+
+    if (!front) {
+      ctx.save();
+      ctx.rotate(aim);
+      if (flip < 0) ctx.scale(1, -1);
+      drawGun(r, weaponId, recoil, muzzle, gsc);
+      ctx.restore();
+    }
 
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
@@ -902,22 +1106,28 @@
     ctx.strokeStyle = "rgba(150,235,255," + (alpha * 0.9) + ")";
     ctx.stroke();
 
-    ctx.save();
-    ctx.rotate(aim);
-    ctx.beginPath();
-    ctx.moveTo(r - 1, 0);
-    ctx.lineTo(r - r * 0.62, -r * 0.34);
-    ctx.lineTo(r - r * 0.62, r * 0.34);
-    ctx.closePath();
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.fill();
-    ctx.restore();
+    if (front) {
+      ctx.save();
+      ctx.rotate(aim);
+      if (flip < 0) ctx.scale(1, -1);
+      ctx.translate(r * 0.72, 0);
+      drawGun(r, weaponId, recoil, muzzle, gsc, 0);
+      ctx.restore();
+    }
+
+    drawFace(r, eye, alpha);
 
     ctx.restore();
   }
 
   function drawPlayer(p) {
-    drawPawn(p.x, p.y, p.r, p.aim, p.invuln > 0 ? 0.35 : 1, p.recoil, p.muzzle, WEAPONS[game.weapon].id, false);
+    var wmx = mouse.x + game.cam.x, wmy = mouse.y + game.cam.y;
+    var look = lookAt(p.x, p.y, wmx, wmy);
+    // 血量低 -> 瘪嘴，开火中 -> 抿嘴，其余 -> 笑
+    var mood = p.hp / p.maxHp <= 0.35 ? "frown" : (p.combat > 0 ? "flat" : "smile");
+    var inv = p.invuln > 0 ? 0.35 : 1;
+    drawPawn(p.x, p.y, p.r, p.aim, inv, p.recoil, p.muzzle, WEAPONS[game.weapon].id,
+      false, 1, { x: look.x, y: look.y, mood: mood });
 
     if (p.dashCd > 0) {
       ctx.beginPath();
@@ -968,13 +1178,14 @@
     ctx.restore();
   }
 
-  function drawCrosshair(grow) {
+  // hover ∈ 0..1：停在可点元素上时准星张开，跟卡片提亮同步
+  function drawCrosshair(hover) {
     ctx.save();
     ctx.translate(mouse.x, mouse.y);
     ctx.strokeStyle = "rgba(140,235,255,0.9)";
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.arc(0, 0, grow ? 12 : 9, 0, Math.PI * 2);
+    ctx.arc(0, 0, 9 + 3 * (hover || 0), 0, Math.PI * 2);
     ctx.stroke();
     ctx.beginPath();
     ctx.moveTo(-16, 0); ctx.lineTo(-6, 0);
@@ -1051,34 +1262,86 @@
     ctx.closePath();
   }
 
-  function drawCard(c) {
-    var sel = (c.kind === "weapon" ? game.weapon === c.idx : game.mode === MODES[c.idx].id);
-    var hov = game.hover === game.cards.indexOf(c);
-    roundRect(c.x, c.y, c.w, c.h, 10);
-    ctx.fillStyle = sel ? "rgba(124,231,255,0.10)" : C.panel;
+  // ---------- 界面动效 ----------
+  // 每个可交互元素一个 { h, p }：悬停 / 按下各自的进度，0..1
+  // 用 pow(remain, dt) 逼近目标 —— 临界阻尼、不过冲，也不违反"不用缓动曲线"的约定
+  var UI_ANIM = Object.create(null);
+  var ANIM_K = 1e-5;          // 1 秒后只剩这么多：约 0.087s 走完 63%
+  var PAGE_T = 0.14;          // 换页淡入时长（线性）
+
+  function animOf(id) {
+    var a = UI_ANIM[id];
+    if (!a) a = UI_ANIM[id] = { h: 0, p: 0 };
+    return a;
+  }
+
+  // 菜单与暂停时推进这些进度；对局中不跑，省掉每帧的无效计算
+  function uiStep(dt) {
+    var k = Math.pow(ANIM_K, dt);
+    for (var i = 0; i < game.ui.length; i++) {
+      var u = game.ui[i], a = animOf(u.id);
+      a.h += ((game.hoverId === u.id ? 1 : 0) - a.h) * (1 - k);
+      a.p += ((game.pressId === u.id ? 1 : 0) - a.p) * (1 - k);
+      if (a.h < 0.001) a.h = 0;
+      if (a.p < 0.001) a.p = 0;
+    }
+    if (game.pageT < 1) game.pageT = Math.min(1, game.pageT + dt / PAGE_T);
+  }
+
+  function hoverAmt() {
+    var m = 0;
+    for (var i = 0; i < game.ui.length; i++) {
+      var a = animOf(game.ui[i].id);
+      if (a.h > m) m = a.h;
+    }
+    return m;
+  }
+
+  // 按下时整块缩一点，绕自身中心缩放，文字跟着一起缩——手感才像真的按下去
+  function withPress(u, fn) {
+    var a = animOf(u.id);
+    var sc = 1 - 0.03 * a.p;
+    if (sc > 0.999) { fn(a); return; }
+    ctx.save();
+    ctx.translate(u.x + u.w / 2, u.y + u.h / 2);
+    ctx.scale(sc, sc);
+    ctx.translate(-(u.x + u.w / 2), -(u.y + u.h / 2));
+    fn(a);
+    ctx.restore();
+  }
+
+  // 卡片底：选中描边用主角色；悬停 / 按下按进度提亮
+  // 顶部一条 1px 受光边，和墙体同源——让卡片读成"有厚度的板"，而不是一块半透明色块
+  function cardBg(u, on) {
+    var a = animOf(u.id);
+    var f0 = on ? 0.10 : 0.09, fh = on ? 0.14 : 0.13, fp = 0.19;
+    var fa = f0 + (fh - f0) * a.h;
+    fa += (fp - fa) * a.p;
+
+    roundRect(u.x, u.y, u.w, u.h, 10);
+    ctx.fillStyle = on
+      ? "rgba(124,231,255," + fa.toFixed(3) + ")"
+      : "rgba(255,255,255," + fa.toFixed(3) + ")";
     ctx.fill();
-    roundRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1, 10);
-    ctx.strokeStyle = sel ? C.player : (hov ? "rgba(255,255,255,0.35)" : C.line);
+
+    roundRect(u.x + 0.5, u.y + 0.5, u.w - 1, u.h - 1, 10);
+    ctx.strokeStyle = on ? C.player : "rgba(255,255,255," + (0.18 + 0.17 * a.h + 0.13 * a.p).toFixed(3) + ")";
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    var data = c.kind === "weapon" ? WEAPONS[c.idx] : MODES[c.idx];
-    ctx.textAlign = "left";
-    ctx.font = "600 16px " + C.mono;
-    ctx.fillStyle = C.text;
-    ctx.fillText(data.cn, c.x + 14, c.y + 27);
-    ctx.font = "500 11px " + C.mono;
-    ctx.fillStyle = sel ? C.player : C.text2;
-    ctx.letterSpacing = "0.16em";
-    ctx.fillText(data.en, c.x + 14, c.y + 46);
-    ctx.letterSpacing = "0px";
+    ctx.fillStyle = "rgba(255,255,255," + (0.09 + 0.05 * a.h).toFixed(3) + ")";
+    ctx.fillRect(u.x + 12, u.y + 1.5, u.w - 24, 1);
   }
 
-  function drawMenu(t) {
-    ctx.fillStyle = "rgba(5,8,14,0.78)";
-    ctx.fillRect(0, 0, W, H);
+  // 选中标记：装备卡与模式卡同一种点——长得一样的东西，选中的表示法也必须一样
+  function drawSelDot(u, on) {
+    ctx.beginPath();
+    ctx.arc(u.x + u.w - 26, u.y + 26, 5, 0, Math.PI * 2);
+    if (on) { ctx.fillStyle = C.player; ctx.fill(); }
+    else { ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.lineWidth = 1.4; ctx.stroke(); }
+  }
 
-    // 项目名：左上
+  function drawTitleBlock() {
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.fillStyle = "#eef8ff";
@@ -1095,25 +1358,233 @@
     ctx.fillText("方寸之内，退无可退。", 49, 156);
     ctx.letterSpacing = "0px";
     ctx.textBaseline = "alphabetic";
+  }
 
-    // 主角：正中，枪口跟鼠标
-    var cx = W / 2, cy = H / 2 - 36;
-    var aim = Math.atan2(mouse.y - cy, mouse.x - cx);
-    drawPawn(cx, cy, 34, aim, 1, 0, 0, WEAPONS[game.weapon].id, true, 1.5);
+  // 子页标题：与首页标题同一处落笔，只降一号
+  function drawPageTitle(cn, en) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "#eef8ff";
+    ctx.font = "800 44px " + C.mono;
+    ctx.letterSpacing = "0.10em";
+    ctx.fillText(cn, 48, 46);
+    ctx.letterSpacing = "0.28em";
+    ctx.font = "500 13px " + C.mono;
+    ctx.fillStyle = "rgba(160,205,240,0.8)";
+    ctx.fillText(en, 50, 100);
+    ctx.letterSpacing = "0px";
+    ctx.textBaseline = "alphabetic";
+  }
 
-    for (var i = 0; i < game.cards.length; i++) drawCard(game.cards[i]);
+  function drawBackBtn() {
+    var u = uiById("backHome");
+    if (!u) return;
+    withPress(u, function (a) {
+      cardBg(u, false);
+      ctx.textAlign = "center";
+      ctx.font = "600 13px " + C.mono;
+      ctx.fillStyle = a.h > 0.02 ? C.player : "rgba(190,215,240,0.85)";
+      ctx.fillText("← 返回", u.x + u.w / 2, u.y + 26);
+    });
+  }
 
+  // 首页入口按钮：中文名 + 英文名 + 当前取值，右端一个尖角箭头
+  function drawNavButton(u, cn, en, value) {
+    withPress(u, function (a) {
+      cardBg(u, false);
+      ctx.textAlign = "left";
+      ctx.font = "600 18px " + C.mono;
+      ctx.fillStyle = C.text;
+      ctx.fillText(cn, u.x + 20, u.y + 33);
+      ctx.font = "500 10px " + C.mono;
+      ctx.fillStyle = C.text2;
+      ctx.letterSpacing = "0.18em";
+      ctx.fillText(en, u.x + 21, u.y + 52);
+      ctx.letterSpacing = "0px";
+      ctx.font = "600 12px " + C.mono;
+      ctx.fillStyle = "rgba(124,231,255," + (0.72 + 0.28 * a.h).toFixed(3) + ")";
+      ctx.fillText(value, u.x + 20, u.y + 72);
+
+      // 箭头随悬停前移 3px：手没动也能看出"这里能进去"
+      var ax = u.x + u.w - 20 + 3 * a.h;
+      ctx.strokeStyle = "rgba(" + Math.round(255 - 131 * a.h) + ",255,255," + (0.30 + 0.70 * a.h).toFixed(3) + ")";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(ax - 6, u.y + u.h / 2 - 5);
+      ctx.lineTo(ax, u.y + u.h / 2);
+      ctx.lineTo(ax - 6, u.y + u.h / 2 + 5);
+      ctx.stroke();
+    });
+  }
+
+  function drawHome(t) {
+    drawTitleBlock();
+
+    // 主角：正中偏上。枪固定指向左下（端枪姿势，不跟鼠标转），只有眼珠朝鼠标
+    var cx = W / 2, cy = H / 2 - 28;
+    var hr = clamp(Math.min(W, H) * 0.068, 36, 58);
+    var look = lookAt(cx, cy, mouse.x, mouse.y);
+
+    // 端着枪会累：两个低频正弦叠一起，身体微微起伏、枪口轻轻漂
+    // 单一频率看起来像机械振动，两个互质频率才像呼吸
+    var sway = Math.sin(t * 1.15) * 0.68 + Math.sin(t * 0.53 + 1.2) * 0.32;
+    var bob = Math.sin(t * 1.15 + 0.6) * 0.030;
+
+    drawPawn(cx, cy + bob * hr, hr, HOME_AIM + sway * 0.055, 1, 0, 0,
+      WEAPONS[game.weapon].id, true, 1.9,
+      { x: look.x, y: look.y, mood: "smile" }, true);
+
+    var a = uiById("toEquip"), b = uiById("toMode");
+    if (a) drawNavButton(a, "装备选择", "EQUIPMENT", WEAPONS[game.weapon].cn);
+    if (b) drawNavButton(b, "模式选择", "MODE", MODES[game.mode === "classic" ? 0 : 1].cn);
+  }
+
+  function drawEquip() {
+    drawPageTitle("装备选择", "EQUIPMENT");
+    drawBackBtn();
+    for (var i = 0; i < WEAPONS.length; i++) {
+      var u = uiById("weapon" + i);
+      if (u) drawWeaponCard(u, WEAPONS[i], i);
+    }
+    drawFooter("点击卡片切换装备 · Esc 返回");
+  }
+
+  function drawWeaponCard(u, wp, idx) {
+    var on = game.weapon === idx;
+    withPress(u, function (a) {
+    cardBg(u, on);
+
+    // 枪械预览：按整把枪的包围盒居中（含枪托），与游戏里同一套图元
+    var r = 42, sc = 2.35;
+    var sp = gunSpan(r, wp.id, sc);
+    ctx.save();
+    ctx.translate(u.x + u.w / 2 - (sp.min + sp.max) / 2, u.y + 74);
+    drawGun(r, wp.id, 0, 0, sc);
+    ctx.restore();
+
+    ctx.textAlign = "left";
+    ctx.font = "700 20px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(wp.cn, u.x + 22, u.y + 146);
+    ctx.font = "500 10px " + C.mono;
+    ctx.fillStyle = on ? C.player : C.text2;
+    ctx.letterSpacing = "0.18em";
+    ctx.fillText(wp.en, u.x + 23, u.y + 165);
+    ctx.letterSpacing = "0px";
+
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(u.x + 22, u.y + 180, u.w - 44, 1);
+
+    var rows = [
+      ["伤害", String(wp.dmg)],
+      ["间隔", wp.cd.toFixed(2) + "s"],
+      ["散布", (wp.spread * 180 / Math.PI).toFixed(1) + "°"],
+      ["弹速", String(wp.speed)],
+      ["每秒伤害", String(Math.round(wp.dmg / wp.cd))]
+    ];
+    for (var i = 0; i < rows.length; i++) {
+      var ry = u.y + 206 + i * 27;
+      ctx.textAlign = "left";
+      ctx.font = "500 13px " + C.mono;
+      ctx.fillStyle = "rgba(160,190,215,0.78)";
+      ctx.fillText(rows[i][0], u.x + 22, ry);
+      ctx.textAlign = "right";
+      ctx.font = "600 13px " + C.mono;
+      ctx.fillStyle = on ? C.player : C.text;
+      ctx.fillText(rows[i][1], u.x + u.w - 22, ry);
+    }
+    ctx.textAlign = "left";
+    drawSelDot(u, on);
+    });
+  }
+
+  function drawMode() {
+    drawPageTitle("模式选择", "MODE");
+    drawBackBtn();
+    for (var i = 0; i < MODES.length; i++) {
+      var u = uiById("mode" + i);
+      if (u) drawModeCard(u, MODES[i]);
+    }
+    var s = uiById("start");
+    if (s) drawStartBtn(s);
+    drawFooter("WASD 移动 · 鼠标瞄准 · 左键射击 · Shift 冲刺 · Esc 暂停");
+  }
+
+  // 页脚提示：与左右边距同一套 48px 安全线，不贴着屏幕边
+  function drawFooter(text) {
     ctx.textAlign = "center";
-    ctx.font = "600 16px " + C.mono;
-    ctx.fillStyle = "rgba(140,235,255,0.95)";
-    ctx.globalAlpha = 0.55 + Math.sin(t / 0.32) * 0.45;
-    ctx.fillText("点击任意处开始", W / 2, H - 88);
-    ctx.globalAlpha = 1;
-    ctx.font = "500 15px " + C.mono;
-    ctx.fillStyle = "rgba(160,205,240,0.85)";
-    ctx.fillText("WASD 移动 · 鼠标瞄准 · 左键射击 · Shift 冲刺 · Esc 暂停", W / 2, H - 56);
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = "rgba(150,190,225,0.66)";
+    ctx.fillText(text, W / 2, H - 48);
+  }
 
-    drawCrosshair(game.hover >= 0);
+  function drawModeCard(u, m) {
+    var on = game.mode === m.id;
+    withPress(u, function () {
+    cardBg(u, on);
+
+    ctx.textAlign = "left";
+    ctx.font = "700 24px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(m.cn, u.x + 24, u.y + 52);
+    ctx.font = "500 10px " + C.mono;
+    ctx.fillStyle = on ? C.player : C.text2;
+    ctx.letterSpacing = "0.20em";
+    ctx.fillText(m.en, u.x + 25, u.y + 74);
+    ctx.letterSpacing = "0px";
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = "rgba(160,190,215,0.78)";
+    ctx.fillText(m.id === "classic" ? "无尽波次 · 视野即全图" : "安全屋 · 三处入口 · 逐关推进", u.x + 24, u.y + 110);
+
+    drawSelDot(u, on);
+    });
+  }
+
+  function drawStartBtn(u) {
+    withPress(u, function (a) {
+      var lit = Math.max(a.h, a.p);
+      roundRect(u.x, u.y, u.w, u.h, 10);
+      ctx.fillStyle = "rgba(124,231,255," + (0.13 + 0.09 * a.h + 0.08 * a.p).toFixed(3) + ")";
+      ctx.fill();
+      roundRect(u.x + 0.5, u.y + 0.5, u.w - 1, u.h - 1, 10);
+      ctx.strokeStyle = "rgba(124,231,255," + (0.55 + 0.40 * lit).toFixed(3) + ")";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255," + (0.12 + 0.06 * a.h).toFixed(3) + ")";
+      ctx.fillRect(u.x + 14, u.y + 1.5, u.w - 28, 1);
+
+      ctx.textAlign = "center";
+      ctx.font = "700 18px " + C.mono;
+      ctx.fillStyle = "#eaf6ff";
+      ctx.fillText("开始游戏", u.x + u.w / 2, u.y + 31);
+      ctx.font = "500 10px " + C.mono;
+      ctx.letterSpacing = "0.26em";
+      ctx.fillStyle = "rgba(160,220,245," + (0.85 + 0.15 * lit).toFixed(3) + ")";
+      ctx.fillText("START", u.x + u.w / 2, u.y + 49);
+      ctx.letterSpacing = "0px";
+    });
+  }
+
+  // 换页不做位移，只做"材料到位"：透明度 + 轻微放大，方向中性，来回都不会有方向错觉
+  function drawMenu(t) {
+    ctx.fillStyle = "rgba(5,8,14,0.78)";
+    ctx.fillRect(0, 0, W, H);
+
+    var e = game.pageT;
+    if (e < 1) {
+      ctx.save();
+      ctx.globalAlpha = e;
+      var k = 0.982 + 0.018 * e;
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(k, k);
+      ctx.translate(-W / 2, -H / 2);
+    }
+    if (game.screen === "equip") drawEquip();
+    else if (game.screen === "mode") drawMode();
+    else drawHome(t);
+    if (e < 1) ctx.restore();
+
+    drawCrosshair(hoverAmt());
   }
 
   function drawOverlay() {
@@ -1123,10 +1594,32 @@
       ctx.textAlign = "center";
       ctx.fillStyle = "#eef8ff";
       ctx.font = "800 44px " + C.mono;
-      ctx.fillText("已暂停", W / 2, H / 2 - 6);
+      ctx.fillText("已暂停", W / 2, H / 2 - 44);
       ctx.font = "500 14px " + C.mono;
       ctx.fillStyle = "rgba(160,205,240,0.8)";
-      ctx.fillText("按 Esc 继续", W / 2, H / 2 + 28);
+      ctx.fillText("按 Esc 继续", W / 2, H / 2 - 6);
+
+      var b = uiById("exitRun");
+      if (b) withPress(b, function (a) {
+        var lit = Math.max(a.h, a.p);
+        roundRect(b.x, b.y, b.w, b.h, 10);
+        ctx.fillStyle = "rgba(255," + Math.round(255 - 164 * lit) + "," + Math.round(255 - 164 * lit) +
+          "," + (0.07 + 0.15 * lit).toFixed(3) + ")";
+        ctx.fill();
+        roundRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1, 10);
+        ctx.strokeStyle = "rgba(255," + Math.round(91 + 29 * lit) + "," + Math.round(91 + 29 * lit) + "," + (0.34 + 0.51 * lit).toFixed(3) + ")";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.font = "600 15px " + C.mono;
+        ctx.fillStyle = lit > 0.5 ? "#ffb9b9" : "rgba(255,150,150,0.92)";
+        ctx.fillText("退出本局", b.x + b.w / 2, b.y + 22);
+        ctx.font = "500 10px " + C.mono;
+        ctx.letterSpacing = "0.20em";
+        ctx.fillStyle = "rgba(255," + Math.round(140 + 30 * lit) + "," + Math.round(140 + 30 * lit) + "," + (0.55 + 0.35 * lit).toFixed(3) + ")";
+        ctx.fillText("ABANDON RUN", b.x + b.w / 2, b.y + 38);
+        ctx.letterSpacing = "0px";
+      });
     } else if (game.state === "over") {
       ctx.fillStyle = "rgba(10,4,6,0.82)";
       ctx.fillRect(0, 0, W, H);
@@ -1241,8 +1734,8 @@
       drawMenu(t);
     } else {
       drawHUD();
-      drawCrosshair(false);
       drawOverlay();
+      drawCrosshair(game.state === "paused" ? hoverAmt() : 0);   // 准星永远在最上层，暂停时也不被遮罩压暗
     }
   }
 
@@ -1252,20 +1745,21 @@
     keys[e.code] = true;
 
     if (e.code === "Escape") {
-      if (game.state === "over") { game.state = "menu"; menuLayout(); return; }
+      if (game.state === "over") { backToMenu(); return; }
+      if (game.state === "menu") {
+        if (game.screen !== "home") { game.screen = "home"; game.hoverId = null; game.pageT = 0; menuLayout(); }
+        return;
+      }
       togglePause();
       return;
     }
 
     if (game.state === "menu") {
-      if (e.code === "ArrowLeft" || e.code === "ArrowUp") { game.focus = (game.focus + 3) % 4; return; }
-      if (e.code === "ArrowRight" || e.code === "ArrowDown") { game.focus = (game.focus + 1) % 4; return; }
-      if (e.code === "KeyA" || e.code === "KeyD") {
-        game.focus = game.focus < 2 ? 1 - game.focus : game.focus;
-        pick(game.focus);
-        return;
+      if (e.code === "Enter" || e.code === "Space") {
+        if (game.screen === "mode") startRun();
+        else if (game.screen === "equip") { game.screen = "home"; game.pageT = 0; menuLayout(); }
+        else { game.screen = "mode"; game.hoverId = null; game.pageT = 0; menuLayout(); }
       }
-      if (e.code === "Enter" || e.code === "Space") { pick(game.focus); startRun(); return; }
       return;
     }
 
@@ -1277,32 +1771,45 @@
   canvas.addEventListener("mousemove", function (e) {
     mouse.x = e.clientX;
     mouse.y = e.clientY;
-    if (game.state === "menu") {
-      menuLayout();
-      game.hover = cardAt(mouse.x, mouse.y);
+    if (game.state === "menu" || game.state === "paused") {
+      var it = hitUi(mouse.x, mouse.y);
+      game.hoverId = it ? it.id : null;
     } else {
-      game.hover = -1;
+      game.hoverId = null;
     }
   });
 
+  // 按下只高亮，抬起且仍在同一块上才提交——按下就有反馈，滑走可以反悔
   canvas.addEventListener("mousedown", function (e) {
     if (e.button !== 0) return;
     mouse.x = e.clientX;
     mouse.y = e.clientY;
     mouse.down = true;
 
-    if (game.state === "menu") {
-      menuLayout();
-      var i = cardAt(mouse.x, mouse.y);
-      if (i >= 0) { pick(i); return; }
-      startRun();
+    if (game.state === "menu" || game.state === "paused") {
+      var it = hitUi(mouse.x, mouse.y);
+      game.hoverId = it ? it.id : null;
+      game.pressId = it ? it.id : null;
       return;
     }
     if (game.state === "over") startRun();
   });
 
-  window.addEventListener("mouseup", function (e) { if (e.button === 0) mouse.down = false; });
-  window.addEventListener("blur", function () { mouse.down = false; keys = Object.create(null); });
+  window.addEventListener("mouseup", function (e) {
+    if (e.button !== 0) return;
+    mouse.down = false;
+    var id = game.pressId;
+    game.pressId = null;
+    if (!id || (game.state !== "menu" && game.state !== "paused")) return;
+    var it = hitUi(mouse.x, mouse.y);
+    if (it && it.id === id) act(it);
+  });
+
+  window.addEventListener("blur", function () {
+    mouse.down = false;
+    game.pressId = null;
+    keys = Object.create(null);
+  });
   canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
   // ---------- 主循环 ----------
@@ -1317,6 +1824,7 @@
     clock += dt;
 
     if (game.state === "playing") update(dt);
+    else if (game.state === "menu" || game.state === "paused") uiStep(dt);
     render(clock);
 
     requestAnimationFrame(loop);
