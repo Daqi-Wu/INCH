@@ -927,66 +927,91 @@
     }
   }
 
-  // 一把枪的剪影：枪托 + 机匣 + 握把 + 枪管 + 枪口 + 瞄具
-  // 所有部件顺时针画进同一条路径，先粗描深色再填亮色 —— 得到一整块 2px 的外描边，
-  // 部件之间的接缝被填色盖掉，所以看起来是一把枪，而不是几块拼起来的白条
+  // 一把圆头圆脑的激光手枪：机身 + 枪管 + 枪口 + 斜握把（+ 步枪的枪托）
+  // 全部用 roundRect 画进同一条路径，先粗描深色再填亮色 —— 外描边是一整块，
+  // 内部接缝被填色盖掉，所以读起来是一把枪，不是几块拼起来的白条
+  // 所有尺寸都乘 r×sc：换个尺寸画，胖瘦比例不变
   function gunPath(r, id, sc, x0) {
     var isR = id === "rifle";
-    var len = (isR ? r * 1.5 : r * 0.95) * sc;
-    var H = (isR ? 12 : 13) * sc;        // 机匣高
-    var bw = (isR ? 7 : 8) * sc;         // 枪管高
-    var bodyEnd = x0 + len * 0.48;
-    var tipW = 6 * sc;
+    var k = r * sc;
+    var len = (isR ? 1.45 : 0.95) * k;
+    var H = (isR ? 0.30 : 0.34) * k;       // 机身厚
+    var bw = H * 0.46;                     // 枪管细一半
+    var bodyEnd = x0 + len * (isR ? 0.56 : 0.58);
+    var tipW = len * 0.08;
     var barEnd = x0 + len - tipW;
-    var gx = x0 + len * (isR ? 0.10 : 0.14);   // 握把前缘
-    var gw = len * 0.12;                        // 握把宽
-    var gh = H * 1.0;                           // 握把长
+    var gw = H * 0.42, gh = H * 0.92;
+    var gx = x0 + len * (isR ? 0.14 : 0.20);
 
     ctx.beginPath();
-    if (isR) {                                            // 枪托：细长，略向下垂
-      ctx.moveTo(x0 - H * 1.15, -H * 0.30);
-      ctx.lineTo(x0, -H * 0.5);
-      ctx.lineTo(x0, H * 0.5);
-      ctx.lineTo(x0 - H * 1.15, H * 0.62);
-      ctx.closePath();
-    }
-    ctx.rect(x0, -H / 2, bodyEnd - x0, H);                // 机匣
-    ctx.moveTo(gx, H / 2 - 1);                            // 握把：向后下方斜
-    ctx.lineTo(gx + gw, H / 2 - 1);
-    ctx.lineTo(gx + gw * 0.35, H / 2 + gh);
-    ctx.lineTo(gx - gw * 0.55, H / 2 + gh);
-    ctx.closePath();
-    ctx.rect(bodyEnd, -bw / 2, barEnd - bodyEnd, bw);     // 枪管
-    ctx.rect(barEnd, -bw * 0.85, tipW, bw * 1.7);         // 枪口
-    ctx.rect(bodyEnd - 9 * sc, -H / 2 - 3 * sc, 5 * sc, 3 * sc);   // 瞄具
-    return { len: len, H: H, bodyEnd: bodyEnd, gx: gx, gw: gw, gh: gh };
+    ctx.roundRect(x0, -H / 2, bodyEnd - x0, H, H * 0.36);                       // 机身
+    ctx.roundRect(bodyEnd - 3, -bw / 2, barEnd - bodyEnd + 3, bw, bw * 0.48);   // 枪管
+    if (isR) ctx.roundRect(x0 - H * 0.95, -H * 0.30, H * 1.10, H * 0.60, H * 0.24);
+    ctx.save();
+    ctx.translate(gx, H * 0.22);
+    ctx.rotate(0.42);
+    ctx.roundRect(-gw / 2, 0, gw, gh, gw * 0.42);                                // 握把
+    ctx.restore();
+    return {
+      len: len, H: H, bw: bw, bodyEnd: bodyEnd, barEnd: barEnd,
+      tipW: tipW, gx: gx, gw: gw, gh: gh
+    };
   }
 
   // 枪在局部坐标里占的横向范围，给"居中预览"用
   function gunSpan(r, id, sc) {
     var isR = id === "rifle";
+    var k = r * sc;
     var x0 = r - 3;
-    var len = (isR ? r * 1.5 : r * 0.95) * sc;
-    var H = (isR ? 12 : 13) * sc;
-    return { min: x0 - (isR ? H * 1.15 : 0), max: x0 + len };
+    var len = (isR ? 1.45 : 0.95) * k;
+    var H = (isR ? 0.30 : 0.34) * k;
+    return { min: x0 - (isR ? H * 0.95 : 0), max: x0 + len };
+  }
+
+  // 握把单独上一档更暗的色，形状才不是一个整块白
+  function gripPath(g) {
+    ctx.beginPath();
+    ctx.save();
+    ctx.translate(g.gx, g.H * 0.22);
+    ctx.rotate(0.42);
+    ctx.roundRect(-g.gw / 2, 0, g.gw, g.gh, g.gw * 0.42);
+    ctx.restore();
   }
 
   function drawGun(r, id, recoil, muzzle, sc, x0) {
     sc = sc || 1;
     if (x0 === undefined) x0 = r - 3 - recoil;
     var g = gunPath(r, id, sc, x0);
+    var lw = Math.max(1.5, g.H * 0.12);
 
+    // 一次描粗边、一次填亮色：整把枪共用一条外轮廓，内部接缝被填色盖掉
     ctx.lineJoin = "round";
     ctx.strokeStyle = "rgba(6,14,24,0.92)";
-    ctx.lineWidth = 4 * sc;
+    ctx.lineWidth = lw * 2;
     ctx.stroke();
-    ctx.fillStyle = "rgba(207,233,255,1)";
+    ctx.fillStyle = "rgba(212,236,255,1)";
     ctx.fill();
 
-    ctx.fillStyle = "rgba(124,231,255,0.9)";              // 能量槽
-    ctx.fillRect(x0 + g.len * 0.10, -1.2 * sc, g.len * 0.15, 2.4 * sc);
-    ctx.fillStyle = "rgba(255,255,255,0.30)";             // 机匣与枪管的分模线
-    ctx.fillRect(g.bodyEnd - 2 * sc, -g.H / 2, 2 * sc, g.H);
+    gripPath(g);
+    ctx.fillStyle = "rgba(138,180,214,1)";
+    ctx.fill();
+
+    // 能量槽：机身中段一条青色光条
+    ctx.beginPath();
+    ctx.roundRect(x0 + g.len * 0.14, -g.H * 0.13, g.len * 0.30, g.H * 0.26, g.H * 0.13);
+    ctx.fillStyle = "rgba(124,231,255,0.92)";
+    ctx.fill();
+
+    // 亮口：藏在枪管末端里的一颗发光点，不外凸
+    var ex = g.barEnd - g.bw * 0.55;
+    ctx.beginPath();
+    ctx.arc(ex, 0, g.bw * 0.44, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(124,231,255,0.55)";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(ex, 0, g.bw * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.fill();
 
     if (muzzle > 0) {
       ctx.beginPath();
@@ -996,59 +1021,78 @@
     }
   }
 
-  // 一张脸：一对竖椭圆眼 + 一张会变的嘴。参考图是「深色眼 + 白色月牙高光」，
-  // 这里颜色不换（眼白仍浅、眼珠仍深），只把形状搬过来——
-  // 眼珠做大、跟着视线偏出去，另一侧留出的那道月牙就是图里的高光带
+  // 一张脸：一对竖椭圆黑眼（里面一颗居中白眼球）+ 一张只上下弯的嘴
+  // 参考图里黑色是整颗眼，白是嵌在正中的眼球；颜色一个没换，换的是谁包着谁
   var FACE = {
-    ex: 0.33,    // 眼睛横向偏移（× r）
-    ey: -0.15,   // 眼睛纵向偏移
-    rx: 0.19,    // 眼白横半径
-    ry: 0.275,   // 眼白纵半径
-    pr: 0.70,    // 眼珠相对眼白的大小
-    po: 0.34,    // 眼珠横向偏移上限（× 眼白横半径）
-    mx: 0.22,    // 嘴半宽
-    my: 0.41,    // 嘴纵位
-    mw: 0.048    // 嘴的线宽
+    ex: 0.31,    // 眼睛横向偏移（× r）
+    ey: -0.145,  // 眼睛纵向偏移
+    rx: 0.165,   // 眼半宽
+    ry: 0.24,    // 眼半高（竖椭圆，高宽比 1.45）
+    wx: 0.54,    // 白眼球半宽（相对眼半宽）—— 越小黑边越厚
+    wy: 0.62,    // 白眼球半高
+    mx: 0.19,    // 嘴半宽
+    my: 0.395,   // 嘴的中线（笑与沮丧以这条线为轴，不是以两个嘴角为轴）
+    mw: 0.044    // 嘴的线宽
   };
 
-  // 眼珠比眼白小不了多少，所以不能只在里面挪——它会顶到边界，
-  // 直接用眼白椭圆裁一刀，越界部分自然切掉，月牙的形状才对
-  function drawEye(x, y, rx, ry, lx, ly, alpha, tilt) {
+  // 眼：眼形本身就是裁切区——先裁竖椭圆，攻击态再交上一个半平面，
+  // 把"内上角"整块切掉，留下外上那个尖角，就是在瞪人
+  function drawEye(x, y, rx, ry, lx, ly, alpha, inner, cut, tilt) {
     ctx.save();
     ctx.translate(x, y);
     if (tilt) ctx.rotate(tilt);
 
     ctx.beginPath();
     ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(238,252,255," + alpha + ")";
-    ctx.fill();
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
     ctx.clip();
+
+    if (cut) {
+      var ax = inner * -1.05 * rx, ay = -1.15 * ry;   // 外侧上方（尖角那端）
+      var bx = inner * 1.10 * rx, by = 0.15 * ry;     // 内缘偏下
+      var dx = bx - ax, dy = by - ay;
+      var nx = -dy, ny = dx;                          // 法线
+      if (ny < 0) { nx = -nx; ny = -ny; }             // 统一朝下方（保留侧）
+      var m = Math.hypot(nx, ny) || 1, big = (rx + ry) * 4;
+      nx = nx / m * big; ny = ny / m * big;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.lineTo(bx + nx, by + ny);
+      ctx.lineTo(ax + nx, ay + ny);
+      ctx.closePath();
+      ctx.clip();
+    }
+
+    // 黑眼：铺满整个裁切区
+    ctx.fillStyle = "rgba(8,17,30," + alpha + ")";
+    ctx.fillRect(-rx * 1.4, -ry * 1.4, rx * 2.8, ry * 2.8);
+
+    // 白眼球：居中，只随视线轻轻偏，绝对不出黑边
+    var wrx = rx * FACE.wx, wry = ry * FACE.wy;
     ctx.beginPath();
     ctx.ellipse(
-      clamp(lx, -1, 1) * rx * FACE.po,
-      clamp(ly, -1, 1) * ry * 0.12,
-      rx * FACE.pr, ry * FACE.pr, 0, 0, Math.PI * 2
+      clamp(lx, -1, 1) * (rx - wrx) * 0.30,
+      clamp(ly, -1, 1) * (ry - wry) * 0.30,
+      wrx, wry, 0, 0, Math.PI * 2
     );
-    ctx.fillStyle = "rgba(8,17,30," + alpha + ")";
+    ctx.fillStyle = "rgba(238,252,255," + alpha + ")";
     ctx.fill();
-    ctx.restore();
 
     ctx.restore();
   }
 
-  // 嘴：两端固定、中间上下弯。笑 = 中间下沉，沮丧 = 中间上拱，专注 = 几乎平
+  // 嘴：两端上下摆动、中间钉在中线上。
+  // 以嘴角为轴时，沮丧要把中间往上顶，整条嘴就往眼睛那边挤；以中间为轴，
+  // 换表情时嘴的视觉位置不动，只是两个嘴角上下翻。
   function drawMouth(r, mood, alpha) {
     var w = r * FACE.mx;
-    var y0 = r * FACE.my;
-    var dip = mood === "smile" ? r * 0.10 : (mood === "frown" ? -r * 0.16 : 0);
+    var yMid = r * FACE.my;
+    var dip = mood === "up" ? r * 0.13 : -r * 0.13;
+    var yEnd = yMid - dip;
 
     ctx.beginPath();
-    ctx.moveTo(-w, y0);
-    ctx.quadraticCurveTo(0, y0 + dip * 2, w, y0);
+    ctx.moveTo(-w, yEnd);
+    ctx.quadraticCurveTo(0, yMid + dip, w, yEnd);
     ctx.lineWidth = Math.max(1.4, r * FACE.mw);
     ctx.lineCap = "round";
     ctx.strokeStyle = "rgba(8,17,30," + alpha + ")";
@@ -1056,16 +1100,18 @@
   }
 
   function drawFace(r, eye, alpha) {
-    var mood = (eye && eye.mood) || "smile";
+    var mood = (eye && eye.mood) || "up";
     var lx = eye ? eye.x : 0, ly = eye ? eye.y : 0;
-    var tilt = mood === "frown" ? 0.17 : 0;               // 沮丧时内眼角上挑
-    var k = mood === "frown" ? 0.90 : (mood === "flat" ? 0.94 : 1);
+    var down = mood === "down" || mood === "angry";
+    var cut = mood === "angry";                   // 只有攻击态切眼
+    var tilt = mood === "down" ? 0.17 : 0;        // 只是不好受 -> 内眼角上挑
+    var k = down ? 0.90 : 1;
     var rx = r * FACE.rx, ry = r * FACE.ry * k;
     var ox = r * FACE.ex, oy = r * FACE.ey;
 
-    drawEye(-ox, oy, rx, ry, lx, ly, alpha, tilt);
-    drawEye(ox, oy, rx, ry, lx, ly, alpha, -tilt);
-    drawMouth(r, mood, alpha);
+    drawEye(-ox, oy, rx, ry, lx, ly, alpha, 1, cut, tilt);
+    drawEye(ox, oy, rx, ry, lx, ly, alpha, -1, cut, -tilt);
+    drawMouth(r, down ? "down" : "up", alpha);
   }
 
   // front = true 时枪画在本体之上、从球的左前方伸出，读作"端着"；
@@ -1123,8 +1169,8 @@
   function drawPlayer(p) {
     var wmx = mouse.x + game.cam.x, wmy = mouse.y + game.cam.y;
     var look = lookAt(p.x, p.y, wmx, wmy);
-    // 血量低 -> 瘪嘴，开火中 -> 抿嘴，其余 -> 笑
-    var mood = p.hp / p.maxHp <= 0.35 ? "frown" : (p.combat > 0 ? "flat" : "smile");
+    // 嘴只有上下两种；开火时额外把眼的内上角切掉，变成瞪人
+    var mood = p.combat > 0 ? "angry" : (p.hp / p.maxHp <= 0.35 ? "down" : "up");
     var inv = p.invuln > 0 ? 0.35 : 1;
     drawPawn(p.x, p.y, p.r, p.aim, inv, p.recoil, p.muzzle, WEAPONS[game.weapon].id,
       false, 1, { x: look.x, y: look.y, mood: mood });
@@ -1432,7 +1478,7 @@
 
     drawPawn(cx, cy + bob * hr, hr, HOME_AIM + sway * 0.055, 1, 0, 0,
       WEAPONS[game.weapon].id, true, 1.9,
-      { x: look.x, y: look.y, mood: "smile" }, true);
+      { x: look.x, y: look.y, mood: "up" }, true);
 
     var a = uiById("toEquip"), b = uiById("toMode");
     if (a) drawNavButton(a, "装备选择", "EQUIPMENT", WEAPONS[game.weapon].cn);
