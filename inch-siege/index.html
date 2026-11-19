@@ -64,7 +64,8 @@
     chaser: { r: 15, hp: 95,  speed: 100, dmg: 15, score: 10, color: "#ff5b5b", glow: "#ff9b9b" },
     fast:   { r: 10, hp: 50,  speed: 190, dmg: 10, score: 15, color: "#ffd166", glow: "#fff0b8" },
     tank:   { r: 26, hp: 160, speed: 58,  dmg: 25, score: 30, color: "#a06bff", glow: "#d6c2ff" },
-    gunner: { r: 16, hp: 110, speed: 72,  dmg: 5,  score: 22, color: "#ff8a3d", glow: "#ffcba6" }
+    gunner: { r: 16, hp: 110, speed: 72,  dmg: 5,  score: 22, color: "#ff8a3d", glow: "#ffcba6" },
+    soldier:{ r: 14, hp: 80,  speed: 105, dmg: 6,  score: 25, color: "#ff4d8d", glow: "#ffb3cc" }
   };
 
   // 三件激光武器，同一个家族。名字就是型号，卡片上只显示型号。
@@ -74,6 +75,11 @@
   // 单发/三连发收束得更紧，是对"不能泼水"的补偿。
   // burst + gap 表示一组几发、组内间隔多长（AL-18 三连发：3 发在 0.4s 内出完）。
   var WEAPONS = [
+    { id: "al10", cn: "AL-10", en: "LASER PISTOL",
+      dmg: 10, cd: 0.25, spread: 0.0227, speed: 700, range: 600, r: 2.8, kick: 1.2,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0227 }
+      ] },
     { id: "al11", cn: "AL-11", en: "LASER PISTOL",
       dmg: 52, cd: 0.25, spread: 0.0157, speed: 1000, range: 800, r: 2.8, kick: 0.8,
       modes: [
@@ -106,8 +112,11 @@
     state: "menu",
     screen: "home",          // 初始界面的三页：home / equip / mode
     mode: "classic",
-    weapon: 0,
-    fireMode: [0, 0, 0],     // 每把枪各自记住上次选的模式
+    weapon: 1,          // 默认 AL-11；AL-10 是最弱的那把，别让人一上来就拿它
+    fireMode: [0, 0, 0, 0],  // 每把枪各自记住上次选的模式
+    squads: Object.create(null),
+    squadSeq: 0,
+    uidSeq: 0,
     hoverId: null,
     pressId: null,
     pageT: 1,
@@ -158,7 +167,7 @@
   // equip：两件装备与全部数值
   // mode：两张模式卡 + 开始游戏 + 底部操作提示
   // 每页布局都写进 game.ui，鼠标只按 id 派发，不再维护焦点下标
-  var EQ_MAXW = 320, EQ_H = 344;
+  var EQ_MAXW = 250, EQ_H = 344;
   var MD_W = 320, MD_H = 146;
   var BTN_START_H = 64, BTN_START_GAP = 48;
 
@@ -177,9 +186,10 @@
   }
 
   function layoutEquip(list) {
-    var gap = 22;
-    var cw = clamp((W - 96 - gap * 2) / 3, 208, EQ_MAXW);   // 三张卡自适应，窄屏也不出画
-    var x0 = W / 2 - (cw * 3 + gap * 2) / 2;
+    var gap = 18;
+    var n = WEAPONS.length;
+    var cw = clamp((W - 96 - gap * (n - 1)) / n, 178, EQ_MAXW);   // 按武器数自适应，窄屏也不出画
+    var x0 = W / 2 - (cw * n + gap * (n - 1)) / 2;
     var y0 = clamp(H * 0.52 - EQ_H / 2, 178, Math.max(178, H - EQ_H - 80));
     list.push({ id: "backHome", kind: "nav", target: "home", x: W - 48 - 104, y: 40, w: 104, h: 42 });
     for (var i = 0; i < WEAPONS.length; i++) {
@@ -585,12 +595,20 @@
     for (var i = 0; i < n; i++) q.push(pickType());
     game.spawnQueue = q;
     game.spawnTimer = 1.0;
+
+    // 小队从上方那个专用门进场，一次把这一关的队都放出来（各自错开一点）
+    var sq = squadsForLevel(game.level);
+    for (var s2 = 0; s2 < sq; s2++) {
+      var gate = game.spawns[0];
+      spawnSquad({ x: gate.x + rand(-34, 34), y: gate.y + rand(-34, 34) });
+    }
     game.banner = "第 " + pad2(game.level) + " 关";
     game.bannerTime = 1.6;
   }
 
-  function spawnEnemy(typeName, point) {
+  function spawnEnemy(typeName, point, opt) {
     if (typeName === "gunner" && countType("gunner") >= 3) typeName = "chaser";
+    opt = opt || {};
     var t = TYPES[typeName];
     var e = {
       type: typeName,
@@ -607,6 +625,11 @@
       vx: 0, vy: 0,
       wobble: rand(0, Math.PI * 2),
       emerge: 0,
+      uid: ++game.uidSeq,
+      squad: opt.squad || 0,             // 士兵：所属小队
+      gun: opt.gun || "al10",            // 士兵：手里那把枪
+      aim: 0, raiseT: 0, cd: 0, gap: 0, ammo: 7, burstIn: 3, muzzle: 0,
+      aware: false,
       charge: -1,                        // >=0 表示正在蓄能，值是已蓄秒数
       aim: 0,
       fireCd: 0.9 + rand(0, 0.9),
@@ -690,7 +713,7 @@
   }
 
   // 命中敌人：白闪 + 击退 + 火花 + 微震
-  function hurtEnemy(idx, b) {
+  function hurtEnemy(idx, b, noReward) {
     var e = game.enemies[idx];
     if (!e) return;
     e.hp -= b.dmg;
@@ -703,10 +726,12 @@
 
     burst(e.x, e.y, e.color, 22, 300);
     burst(e.x, e.y, "#ffffff", 6, 180);
-    game.score += e.score;
-    game.kills++;
-    game.shake = Math.min(game.shake + 4, 14);
-    if (Math.random() < 0.13) {
+    if (!noReward) {
+      game.score += e.score;
+      game.kills++;
+      game.shake = Math.min(game.shake + 4, 14);
+    }
+    if (!noReward && Math.random() < 0.13) {
       game.pickups.push({ x: e.x, y: e.y, r: 11, life: 13, phase: rand(0, 6.28) });
     }
     game.enemies.splice(idx, 1);
@@ -852,6 +877,20 @@
           foeDone = true;
           break;
         }
+        if (fo.side === "soldier") {
+          for (var m4 = 0; m4 < game.enemies.length; m4++) {
+            var s4 = game.enemies[m4];
+            if (s4.type === "soldier") continue;
+            var hr2 = s4.r + fo.r;
+            if (dist2(fo.x, fo.y, s4.x, s4.y) < hr2 * hr2) {
+              hurtEnemy(m4, fo, true);
+              foeDone = true;
+              break;
+            }
+          }
+          if (foeDone) break;
+        }
+
         var fr = fo.r + p.r;
         if (p.invuln <= 0 && p.dashTime <= 0 &&
             dist2(fo.x, fo.y, p.x, p.y) < fr * fr) {
@@ -877,81 +916,114 @@
     var px = p.x, py = p.y;
     if (game.mode === "solo") updateField();
 
+    // 小队先更新状态：谁在推进、要不要后撤
+    for (var sid in game.squads) squadTick(game.squads[sid], dt);
+
     for (var j = game.enemies.length - 1; j >= 0; j--) {
       var e = game.enemies[j];
+      if (!e) continue;
       e.hurt = Math.max(0, e.hurt - dt);
       e.hitCd = Math.max(0, e.hitCd - dt);
       e.wobble += dt * 6;
       if (e.emerge > 0) e.emerge = Math.max(0, e.emerge - dt);
 
-      var nt = navTarget(e);
-      var gx2 = nt ? nt.x : px, gy2 = nt ? nt.y : py;
-      var dx = gx2 - e.x, dy = gy2 - e.y;
-      var d = Math.hypot(dx, dy) || 1;
-      var nx = dx / d, ny = dy / d;
+      // 谁在视野里：玩家优先，其次是士兵。看不见就只是"搜索前进"
+      var tgt = pickTarget(e, p);
+      e.aware = !!tgt;
 
-      var sepX = 0, sepY = 0;
-      for (var k2 = 0; k2 < game.enemies.length; k2++) {
-        if (k2 === j) continue;
-        var o = game.enemies[k2];
-        var ddx = e.x - o.x, ddy = e.y - o.y;
-        var dd = Math.hypot(ddx, ddy);
-        if (dd > 0 && dd < e.r + o.r) {
-          sepX += (ddx / dd) * (e.r + o.r - dd) * 2.2;
-          sepY += (ddy / dd) * (e.r + o.r - dd) * 2.2;
-        }
-      }
-
-      var mvx, mvy;
-      if (e.type === "gunner") {
-        // 距离带按到玩家的直线距离算：d 是到寻路路点的距离，不能拿来判距
-        var pd = Math.hypot(p.x - e.x, p.y - e.y) || 1;
-        gunnerThink(e, p, dt, pd, nx, ny);
-        var slow = e.charge >= 0 ? 0.25 : 1;              // 蓄能时几乎站定，给玩家反打的窗口
-        var gx2 = 0, gy2 = 0;
-        if (pd > GUNNER.far) { gx2 = nx; gy2 = ny; }              // 太远：靠过去（走 BFS 方向，会绕墙）
-        else if (pd < GUNNER.near) { gx2 = -nx; gy2 = -ny; }      // 太近：退开（背对玩家，撞墙就滑）
-        else { gx2 = -ny * e.strafe; gy2 = nx * e.strafe; }       // 带内：横移，只改角度不改距离
-        mvx = gx2 * e.speed * slow + sepX + e.vx;
-        mvy = gy2 * e.speed * slow + sepY + e.vy;
+      if (e.type === "soldier") {
+        soldierThink(e, dt, p, tgt);
       } else {
-        var wob = Math.sin(e.wobble) * 0.28;
-        mvx = nx * e.speed + sepX + (-ny) * wob * e.speed * 0.5 + e.vx;
-        mvy = ny * e.speed + sepY + (nx) * wob * e.speed * 0.5 + e.vy;
+        var nt = navTarget(e);
+        var gx2 = nt ? nt.x : px, gy2 = nt ? nt.y : py;
+        if (tgt && tgt.kind === "soldier") { gx2 = tgt.x; gy2 = tgt.y; }
+        var dx = gx2 - e.x, dy = gy2 - e.y;
+        var d = Math.hypot(dx, dy) || 1;
+        var nx = dx / d, ny = dy / d;
+
+        var sepX = 0, sepY = 0;
+        for (var k2 = 0; k2 < game.enemies.length; k2++) {
+          if (k2 === j) continue;
+          var o = game.enemies[k2];
+          var ddx = e.x - o.x, ddy = e.y - o.y;
+          var dd = Math.hypot(ddx, ddy);
+          if (dd > 0 && dd < e.r + o.r) {
+            sepX += (ddx / dd) * (e.r + o.r - dd) * 2.2;
+            sepY += (ddy / dd) * (e.r + o.r - dd) * 2.2;
+          }
+        }
+
+        var mvx, mvy;
+        if (e.type === "gunner") {
+          // 距离带按到玩家的直线距离算：d 是到寻路路点的距离，不能拿来判距
+          var pd = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+          gunnerThink(e, p, dt, pd, nx, ny);
+          var slow = e.charge >= 0 ? 0.25 : 1;
+          var ax2 = 0, ay2 = 0;
+          if (pd > GUNNER.far) { ax2 = nx; ay2 = ny; }
+          else if (pd < GUNNER.near) { ax2 = -nx; ay2 = -ny; }
+          else { ax2 = -ny * e.strafe; ay2 = nx * e.strafe; }
+          mvx = ax2 * e.speed * slow + sepX + e.vx;
+          mvy = ay2 * e.speed * slow + sepY + e.vy;
+        } else {
+          var wob = Math.sin(e.wobble) * 0.28;
+          var spd = e.aware ? e.speed : e.speed * 0.7;   // 没发现：70% 速度搜索前进
+          mvx = nx * spd + sepX + (-ny) * wob * spd * 0.5 + e.vx;
+          mvy = ny * spd + sepY + (nx) * wob * spd * 0.5 + e.vy;
+        }
+
+        if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
+        moveCircle(e, mvx * dt, mvy * dt, game.mode !== "solo");
+
+        // 横移撞墙就换个方向绕，不然它会贴着墙左右抖
+        e.strafeCd = Math.max(0, e.strafeCd - dt);
+        if (e.type === "gunner" && e.charge < 0 && e.strafeCd <= 0 && (e.blockX || e.blockY)) {
+          e.strafe = -e.strafe;
+          e.strafeCd = 0.4;
+        }
+
+        e.vx *= Math.pow(0.0025, dt);
+        e.vy *= Math.pow(0.0025, dt);
       }
 
-      if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
-
-      moveCircle(e, mvx * dt, mvy * dt, game.mode !== "solo");
-
-      // 横移撞墙就换个方向绕，不然它会贴着墙左右抖
-      e.strafeCd = Math.max(0, e.strafeCd - dt);
-      if (e.type === "gunner" && e.charge < 0 && e.strafeCd <= 0 && (e.blockX || e.blockY)) {
-        e.strafe = -e.strafe;
-        e.strafeCd = 0.4;
-      }
-
-      e.vx *= Math.pow(0.0025, dt);
-      e.vy *= Math.pow(0.0025, dt);
-
-      // 接触伤害
+      // 接触伤害：对玩家（还没发现你的时候不咬人）
       var rr = e.r + p.r;
       var pdd = dist2(e.x, e.y, px, py);
-      if (e.emerge <= 0 && pdd < rr * rr) {
-        // 先把重叠推开，别让敌人嵌进玩家身体里
-        var pd = Math.sqrt(pdd) || 1;
-        moveCircle(e, (e.x - px) / pd * (rr - pd), (e.y - py) / pd * (rr - pd), game.mode !== "solo");
+      if (e.emerge <= 0 && e.aware && pdd < rr * rr) {
+        var pdx = Math.sqrt(pdd) || 1;
+        var kx = (e.x - px) / pdx, ky = (e.y - py) / pdx;
+        moveCircle(e, kx * (rr - pdx), ky * (rr - pdx), game.mode !== "solo");
         if (e.hitCd <= 0 && p.invuln <= 0 && p.dashTime <= 0) {
           p.hp -= e.dmg;
           p.invuln = 0.55;
           e.hitCd = 0.7;
           game.shake = Math.min(game.shake + 8, 16);
           game.hitFlash = 0.6;
-          e.vx = -nx * 320;
-          e.vy = -ny * 320;
-          moveCircle(p, -nx * 14, -ny * 14);
+          e.vx = kx * 320;
+          e.vy = ky * 320;
+          moveCircle(p, kx * 14, ky * 14);
           burst(px, py, "#ff5b5b", 14, 220);
           if (p.hp <= 0) { die(); return; }
+        }
+      }
+
+      // 接触伤害：对士兵（围城敌人打士兵，护甲 0.6）
+      if (e.type !== "soldier" && e.emerge <= 0 && e.hitCd <= 0) {
+        for (var m2 = 0; m2 < game.enemies.length; m2++) {
+          var s3 = game.enemies[m2];
+          if (s3.type !== "soldier") continue;
+          var r2 = e.r + s3.r;
+          if (dist2(e.x, e.y, s3.x, s3.y) < r2 * r2) {
+            s3.hp -= e.dmg * SOLDIER.armor;
+            s3.hurt = 0.12;
+            e.hitCd = 0.7;
+            burst(s3.x, s3.y, s3.color, 5, 130);
+            if (s3.hp <= 0) {
+              burst(s3.x, s3.y, s3.color, 18, 260);
+              game.enemies.splice(m2, 1);
+            }
+            break;
+          }
         }
       }
     }
@@ -995,6 +1067,7 @@
             spawnEnemy(game.spawnQueue.shift());
           } else {
             var active = game.spawns.slice(0, game.level <= 2 ? 1 : (game.level <= 4 ? 2 : 3));
+            if (game.level >= 10 && active.length > 1) active = active.slice(1);  // 上方门只走小队
             spawnEnemy(game.spawnQueue.shift(), active[Math.floor(Math.random() * active.length)]);
           }
         }
@@ -1065,10 +1138,15 @@
   function drawThresholds() {
     if (game.mode !== "solo") return;
     var active = game.level <= 2 ? 1 : (game.level <= 4 ? 2 : 3);
+    var squadLevel = game.level >= 10 && squadsForLevel(game.level) > 0;
     for (var i = 0; i < active; i++) {
+      // 上方门从第 10 关起是"敌军专用"：这一关没有小队就不开
+      if (i === 0 && game.level >= 10 && !squadLevel) continue;
       var s = game.spawns[i];
       var a = 0.12 + Math.sin(game.timeAlive * 2.4 + i) * 0.08;
-      ctx.fillStyle = "rgba(255,91,91," + a + ")";
+      ctx.fillStyle = (i === 0 && game.level >= 10)
+        ? "rgba(255,77,141," + (a + 0.10) + ")"
+        : "rgba(255,91,91," + a + ")";
       if (s.ix === 0) ctx.fillRect(s.x - 48, s.iy > 0 ? 16 : game.mapH - 28, 96, 12);
       else ctx.fillRect(s.ix > 0 ? 16 : game.mapW - 28, s.y - 48, 12, 96);
     }
@@ -1081,6 +1159,8 @@
   // 三把枪是同一个家族的三种口径：长度、机匣厚度，加一块附属件
   // AL-11 手枪（最短，光板） / AL-15 冲锋枪（中段挂弹匣） / AL-18 步枪（最长，背上一条瞄轨）
   var GUNART = {
+    al10: { len: 0.92, H: 0.30, gh: 0.32, rail: false, fore: false },
+    al08: { len: 1.66, H: 0.26, gh: 0.36, rail: true,  fore: false },
     al11: { len: 1.06, H: 0.30, gh: 0.33, rail: false, fore: false },
     al15: { len: 1.26, H: 0.28, gh: 0.34, rail: false, fore: true },
     al18: { len: 1.66, H: 0.26, gh: 0.36, rail: true, fore: false }
@@ -1470,10 +1550,12 @@
   function drawFoes() {
     for (var i = 0; i < game.foes.length; i++) {
       var f = game.foes[i];
+      var fc = f.side === "soldier" ? "255,77,141" : "255,138,61";
+      var fc2 = f.side === "soldier" ? "#ff4d8d" : "#ff8a3d";
       ctx.beginPath();
       ctx.moveTo(f.x - f.vx * 0.03, f.y - f.vy * 0.03);
       ctx.lineTo(f.x, f.y);
-      ctx.strokeStyle = "rgba(255,138,61,0.42)";
+      ctx.strokeStyle = "rgba(" + fc + ",0.42)";
       ctx.lineWidth = 4;
       ctx.lineCap = "round";
       ctx.stroke();
@@ -1487,13 +1569,238 @@
       ctx.lineTo(-f.r * 0.9, 0);
       ctx.lineTo(0, -f.r * 0.78);
       ctx.closePath();
-      ctx.fillStyle = "#ff8a3d";
+      ctx.fillStyle = fc2;
       ctx.fill();
-      ctx.strokeStyle = "rgba(46,14,4,0.85)";
+      ctx.strokeStyle = "rgba(30,8,16,0.85)";
       ctx.lineWidth = 1;
       ctx.stroke();
       ctx.restore();
     }
+  }
+
+  // ---------- 敌军小队 ----------
+  // 三方混战：士兵打围城敌人，围城敌人也打士兵。
+  // 但士兵只在被围城敌人压到 220px 内 5 只以上时后撤——玩家贴脸不会让他们跑。
+  var SOLDIER = {
+    detect: 380,          // 士兵的发现距离（比围城敌人的 500 更近）
+    raise: 0.35,          // 移动中举枪的时间：掩护位没有这个延迟
+    burstGap: 0.4 / 3,    // 组内 3 发在 0.4s 内出完
+    interBurst: 0.2,
+    ammo: 7,              // 一轮 7 发
+    cd: 0.5,              // 打完冷却
+    armor: 0.6,           // 围城敌人对士兵的伤害系数
+    nearR: 220,
+    nearN: 5,
+    boundLen: 300,
+    boundTime: 1.3,
+    boundMax: 2,
+    retreatCd: 5,
+    moveSpread: 0.0611    // 后撤中开火额外 +3.5°
+  };
+
+  // 士兵的两把枪：只给 AI，不进 WEAPONS（玩家装备页看不到）
+  var FOEGUN = {
+    al08: { dmg: 25, speed: 950, range: 800, r: 3.2, spread: 0.0227 },
+    al10: { dmg: 10, speed: 700, range: 600, r: 2.8, spread: 0.0227 }
+  };
+
+  // 发现：看得见 500、隔墙 150；士兵的眼更近
+  function sees(a, x, y) {
+    var d = Math.hypot(x - a.x, y - a.y);
+    var lim = a.type === "soldier" ? SOLDIER.detect : 500;
+    if (losClear(a.x, a.y, x, y)) return d < lim;
+    return d < 150;
+  }
+
+  // 敌人挑目标：玩家或士兵，谁近打谁（玩家距离 ×0.75，稍微优先）
+  function pickTarget(e, p) {
+    var best = null, bd = 1e9;
+    if (sees(e, p.x, p.y)) {
+      best = { kind: "player", x: p.x, y: p.y, ref: p };
+      bd = Math.hypot(p.x - e.x, p.y - e.y) * 0.75;
+    }
+    for (var i = 0; i < game.enemies.length; i++) {
+      var s2 = game.enemies[i];
+      if (s2.type !== "soldier" || s2 === e) continue;
+      if (!sees(e, s2.x, s2.y)) continue;
+      var d = Math.hypot(s2.x - e.x, s2.y - e.y);
+      if (d < bd) { bd = d; best = { kind: "soldier", x: s2.x, y: s2.y, ref: s2 }; }
+    }
+    return best;
+  }
+
+  function nearWall(x, y, gap) {
+    for (var i = 0; i < game.walls.length; i++) {
+      if (circleHit(x, y, gap, game.walls[i])) return true;
+    }
+    return false;
+  }
+
+  // 掩体点：绕着目标撒 12 个点，优先「打得到 + 贴着墙」，再优先「离自己近」
+  function findCover(e, tx, ty, dist) {
+    var best = null, bestScore = -1e9;
+    for (var k = 0; k < 12; k++) {
+      var a = (k / 12) * Math.PI * 2 + e.wobble * 0.15;
+      var rr = dist + (k % 3) * 40;
+      var x = clamp(tx + Math.cos(a) * rr, 30, game.mapW - 30);
+      var y = clamp(ty + Math.sin(a) * rr, 30, game.mapH - 30);
+      if (wallAt(x, y, e.r + 2)) continue;
+      var sc = 0;
+      if (losClear(x, y, tx, ty)) sc += 40;
+      if (nearWall(x, y, 46)) sc += 35;
+      sc -= Math.hypot(x - e.x, y - e.y) * 0.04;
+      if (sc > bestScore) { bestScore = sc; best = { x: x, y: y }; }
+    }
+    return best || { x: e.x, y: e.y };
+  }
+
+  function squadMembers(sq) {
+    var out = [];
+    for (var i = 0; i < game.enemies.length; i++) {
+      var s2 = game.enemies[i];
+      if (s2.type === "soldier" && s2.squad === sq.id) out.push(s2);
+    }
+    return out;
+  }
+
+  // 一次后撤 = 1.3 秒，全员退到背离敌方重心 300px 的锚点；只有 1 人边退边打
+  function squadTick(sq, dt) {
+    var mem = squadMembers(sq);
+    if (!mem.length) { delete game.squads[sq.id]; return; }
+    if (sq.retreatCd > 0) sq.retreatCd = Math.max(0, sq.retreatCd - dt);
+
+    var lead = mem[0], cx = 0, cy = 0, near = 0;
+    for (var j = 0; j < game.enemies.length; j++) {
+      var o = game.enemies[j];
+      if (o.type === "soldier") continue;
+      if (dist2(o.x, o.y, lead.x, lead.y) < SOLDIER.nearR * SOLDIER.nearR) { near++; cx += o.x; cy += o.y; }
+    }
+    sq.near = near;
+
+    if (sq.state !== "retreat" && near >= SOLDIER.nearN && sq.retreatCd <= 0) {
+      if (sq.bounds <= 0) sq.bounds = SOLDIER.boundMax;
+      var vx = lead.x - cx / near, vy = lead.y - cy / near;
+      var m = Math.hypot(vx, vy) || 1;
+      sq.anchorX = clamp(lead.x + vx / m * SOLDIER.boundLen, 40, game.mapW - 40);
+      sq.anchorY = clamp(lead.y + vy / m * SOLDIER.boundLen, 40, game.mapH - 40);
+      sq.state = "retreat";
+      sq.retreatT = 0;
+      sq.mover = mem[0].uid;
+      for (var k = 0; k < mem.length; k++) if (mem[k].gun === "al08") sq.mover = mem[k].uid;
+    }
+
+    if (sq.state === "retreat") {
+      sq.retreatT += dt;
+      if (sq.retreatT >= SOLDIER.boundTime) {
+        sq.state = "advance";
+        sq.bounds--;
+        sq.retreatCd = sq.bounds > 0 ? 0.2 : SOLDIER.retreatCd;
+      }
+    }
+  }
+
+  function spawnSquad(point) {
+    var id = ++game.squadSeq;
+    game.squads[id] = {
+      id: id, state: "advance", bounds: SOLDIER.boundMax, retreatCd: 0,
+      retreatT: 0, anchorX: 0, anchorY: 0, mover: 0, near: 0
+    };
+    for (var i = 0; i < 3; i++) {
+      spawnEnemy("soldier", point, { squad: id, gun: i === 0 ? "al08" : "al10" });
+    }
+    return id;
+  }
+
+  function soldierShoot(e, ang, gun) {
+    var c = Math.cos(ang), s2 = Math.sin(ang);
+    var mx = e.x + c * (e.r + 6), my = e.y + s2 * (e.r + 6);
+    game.foes.push({
+      x: mx, y: my, vx: c * gun.speed, vy: s2 * gun.speed,
+      r: gun.r, life: gun.range / gun.speed, dmg: gun.dmg, ang: ang,
+      side: "soldier"
+    });
+    e.muzzle = 0.07;
+    burst(mx, my, "#ffd0e2", 2, 80);
+  }
+
+  function soldierThink(e, dt, p, tgt) {
+    var sq = game.squads[e.squad];
+    var gun = FOEGUN[e.gun] || FOEGUN.al10;
+    e.cd = Math.max(0, (e.cd || 0) - dt);
+    e.gap = Math.max(0, (e.gap || 0) - dt);
+    e.raiseT = Math.max(0, (e.raiseT || 0) - dt);
+    e.coverT = (e.coverT || 0) - dt;
+    e.muzzle = Math.max(0, (e.muzzle || 0) - dt);
+
+    var retreating = sq && sq.state === "retreat";
+    var tx, ty;
+    if (retreating) { tx = sq.anchorX; ty = sq.anchorY; }
+    else if (tgt) {
+      if (e.coverT <= 0 || e.coverX === undefined) {
+        var c = findCover(e, tgt.x, tgt.y, 240);
+        e.coverX = c.x; e.coverY = c.y; e.coverT = 1.2;
+      }
+      tx = e.coverX; ty = e.coverY;
+    } else { tx = p.x; ty = p.y; }
+
+    var ddx = tx - e.x, ddy = ty - e.y, dd = Math.hypot(ddx, ddy) || 1;
+
+    // 离目标点还远就先走 BFS 路点（会绕墙），最后一段再直着靠过去
+    if (!retreating && dd > 120) {
+      var nt = navTarget(e);
+      if (nt) { ddx = nt.x - e.x; ddy = nt.y - e.y; dd = Math.hypot(ddx, ddy) || 1; }
+    }
+    var speed = e.speed * (retreating ? 2.6 : 1);
+    var mvx = 0, mvy = 0;
+    if (dd > 14) { mvx = ddx / dd * speed; mvy = ddy / dd * speed; }
+
+    // 分离力，别叠在一起
+    for (var i = 0; i < game.enemies.length; i++) {
+      var o = game.enemies[i];
+      if (o === e) continue;
+      var ox = e.x - o.x, oy = e.y - o.y, od = Math.hypot(ox, oy);
+      if (od > 0 && od < e.r + o.r) {
+        mvx += ox / od * (e.r + o.r - od) * 2.2;
+        mvy += oy / od * (e.r + o.r - od) * 2.2;
+      }
+    }
+
+    if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
+
+    // 举枪硬直：只有「正在移动」的士兵才有，掩护位（站定）没有。
+    // 必须站稳 0.25s 以上再起步才重新武装 —— 否则被挤得逐帧抖动时永远举不完枪
+    var moving = mvx * mvx + mvy * mvy > 36;
+    e.stillT = (e.stillT || 0);
+    if (moving) {
+      if (e.stillT > 0.25) { e.raiseT = SOLDIER.raise; e.stillT = 0; }
+    } else { e.stillT += dt; }
+
+    moveCircle(e, mvx * dt, mvy * dt, false);
+    if (e.blockX || e.blockY) { e.coverT = 0; e.wobble += 0.6; }
+
+    // 开火：看得见、在射程内、不在举枪硬直里
+    if (tgt) e.aim = Math.atan2(tgt.y - e.y, tgt.x - e.x);
+    var dist = tgt ? Math.hypot(tgt.x - e.x, tgt.y - e.y) : 1e9;
+    var canFire = !!tgt && dist <= gun.range && losClear(e.x, e.y, tgt.x, tgt.y);
+    if (retreating && sq.mover !== e.uid) canFire = false;
+    if (e.raiseT > 0) canFire = false;
+
+    if (canFire && e.cd <= 0 && e.gap <= 0) {
+      if (e.ammo === undefined) { e.ammo = SOLDIER.ammo; e.burstIn = 3; }
+      var sp = gun.spread + (retreating ? SOLDIER.moveSpread : 0);
+      soldierShoot(e, e.aim + rand(-sp, sp), gun);
+      e.ammo--;
+      e.burstIn--;
+      if (e.ammo <= 0) { e.ammo = SOLDIER.ammo; e.burstIn = 3; e.cd = SOLDIER.cd; e.gap = SOLDIER.cd; }
+      else if (e.burstIn <= 0) { e.burstIn = 3; e.gap = SOLDIER.interBurst; }
+      else { e.gap = SOLDIER.burstGap; }
+    }
+  }
+
+  // 关卡表：10、15、20… 每 5 关一次；队数每 10 关 +1
+  function squadsForLevel(lv) {
+    if (game.mode !== "solo" || lv < 10 || lv % 5 !== 0) return 0;
+    return 1 + Math.floor((lv - 10) / 10);
   }
 
   function drawEnemy(e) {
@@ -1509,6 +1816,14 @@
     ctx.fillStyle = "rgba(0,0,0,0.4)";
     ctx.fill();
 
+    // 士兵的枪先画，让球体盖住枪身——只露出枪管，跟主角同一个道理
+    if (e.type === "soldier") {
+      ctx.save();
+      ctx.rotate(e.aim || 0);
+      drawGun(e.r * 0.9, e.gun || "al10", 0, (e.muzzle || 0) > 0 ? 0.05 : 0, 0.9, e.r * 0.66);
+      ctx.restore();
+    }
+
     var base = e.hurt > 0 ? "#ffffff" : e.color;
     ctx.beginPath();
     ctx.arc(0, 0, e.r, 0, Math.PI * 2);
@@ -1521,8 +1836,27 @@
     ctx.strokeStyle = "rgba(255,255,255,0.22)";
     ctx.stroke();
 
-    drawEnemyEye(e.r, -e.r * 0.33, -e.r * 0.06, 1);
-    drawEnemyEye(e.r, e.r * 0.33, -e.r * 0.06, -1);
+    if (e.type === "soldier") {
+      // 士兵不画眼睛，画一条护目镜：其他敌人都是"眼睛球"，一眼就能把这一种分出来
+      ctx.beginPath();
+      ctx.roundRect(-e.r * 0.64, -e.r * 0.40, e.r * 1.28, e.r * 0.40, e.r * 0.18);
+      ctx.fillStyle = "rgba(12,18,30,0.92)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.roundRect(-e.r * 0.52, -e.r * 0.31, e.r * 1.04, e.r * 0.16, e.r * 0.08);
+      ctx.fillStyle = "rgba(255,208,226,0.95)";
+      ctx.fill();
+    } else {
+      drawEnemyEye(e.r, -e.r * 0.33, -e.r * 0.06, 1);
+      drawEnemyEye(e.r, e.r * 0.33, -e.r * 0.06, -1);
+    }
+
+    if (e.type === "soldier") {
+      ctx.save();
+      ctx.rotate(e.aim || 0);
+      drawGun(e.r * 0.9, e.gun || "al10", 0, (e.muzzle || 0) > 0 ? 0.05 : 0, 0.9);
+      ctx.restore();
+    }
 
     // 蓄能环：外圈走一圈就是全部预告，走满即发
     if (e.type === "gunner" && e.charge >= 0) {
