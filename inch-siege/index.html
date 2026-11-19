@@ -69,13 +69,29 @@
 
   // 三件激光武器，同一个家族。名字就是型号，卡片上只显示型号。
   // 平衡只看三个数：单发伤害、间隔、射程；散布与弹速管手感，弹径管视觉。
+  //
+  // modes 是这把枪能切的射击模式，M 键循环。每个模式自带 spread：
+  // 单发/三连发收束得更紧，是对"不能泼水"的补偿。
+  // burst + gap 表示一组几发、组内间隔多长（AL-18 三连发：3 发在 0.4s 内出完）。
   var WEAPONS = [
     { id: "al11", cn: "AL-11", en: "LASER PISTOL",
-      dmg: 52, cd: 0.25, spread: 0.0157, speed: 1000, range: 800, r: 2.8, kick: 0.8 },
+      dmg: 52, cd: 0.25, spread: 0.0157, speed: 1000, range: 800, r: 2.8, kick: 0.8,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0157 },
+        { id: "semi", cn: "单发", spread: 0.0087 }
+      ] },
     { id: "al15", cn: "AL-15", en: "LASER SMG",
-      dmg: 13, cd: 0.052, spread: 0.0611, speed: 1500, range: 800, r: 2.8, kick: 1.6 },
+      dmg: 13, cd: 0.052, spread: 0.0611, speed: 1500, range: 800, r: 2.8, kick: 1.6,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0611 }
+      ] },
     { id: "al18", cn: "AL-18", en: "LASER RIFLE",
-      dmg: 32, cd: 0.15, spread: 0.020, speed: 1100, range: 935, r: 3.2, kick: 1.4 }
+      dmg: 32, cd: 0.15, spread: 0.020, speed: 1100, range: 935, r: 3.2, kick: 1.4,
+      modes: [
+        { id: "auto",  cn: "连发",   spread: 0.020 },
+        { id: "semi",  cn: "单发",   spread: 0.0122 },
+        { id: "burst", cn: "三连发", spread: 0.0166, burst: 3, gap: 0.4 / 3 }
+      ] }
   ];
 
   var MODES = [
@@ -91,6 +107,7 @@
     screen: "home",          // 初始界面的三页：home / equip / mode
     mode: "classic",
     weapon: 0,
+    fireMode: [0, 0, 0],     // 每把枪各自记住上次选的模式
     hoverId: null,
     pressId: null,
     pageT: 1,
@@ -129,7 +146,10 @@
       aim: 0, fireCd: 0, invuln: 0,
       dashCd: 0, dashTime: 0, dashDirX: 0, dashDirY: 0,
       muzzle: 0, recoil: 0,
-      combat: 0                 // 刚开过火的余温：>0 时嘴抿起来
+      combat: 0,                // 刚开过火的余温：>0 时嘴抿起来
+      trigger: true,            // 扳机是否已复位：单发/三连发必须松开再按
+      burstLeft: 0, burstT: 0,  // 一组连发还没吐完的余量
+      modeFlash: 0              // 切模式时 HUD 闪一下
     };
   }
 
@@ -633,9 +653,27 @@
   }
 
   // ---------- 射击 ----------
+  function fireModeOf(w) {
+    return w.modes[game.fireMode[game.weapon] || 0] || w.modes[0];
+  }
+
+  // M 键：在可用模式里循环。换模式时清掉没打完的一组，免得下一组接着吐
+  function cycleFireMode() {
+    var w = WEAPONS[game.weapon];
+    if (w.modes.length < 2) return;
+    game.fireMode[game.weapon] = (game.fireMode[game.weapon] + 1) % w.modes.length;
+    var p = game.player;
+    if (p) {
+      p.modeFlash = 0.7;
+      p.burstLeft = 0;
+      p.fireCd = Math.max(p.fireCd, 0.12);
+    }
+  }
+
   function shoot(p) {
     var w = WEAPONS[game.weapon];
-    var ang = p.aim + rand(-w.spread, w.spread);
+    var sp = fireModeOf(w).spread;
+    var ang = p.aim + rand(-sp, sp);
     var mx = p.x + Math.cos(p.aim) * (p.r + 6);
     var my = p.y + Math.sin(p.aim) * (p.r + 6);
     game.bullets.push({
@@ -720,11 +758,46 @@
     p.recoil = Math.max(0, p.recoil - dt * 22);
     p.combat = Math.max(0, p.combat - dt);
 
-    // 开火
+    // 开火：连发按住就射；单发 / 三连发必须松开再按（M 换模式）
     p.fireCd -= dt;
+    p.modeFlash = Math.max(0, p.modeFlash - dt);
+    if (!mouse.down) p.trigger = true;
+
+    var wNow = WEAPONS[game.weapon];
+    var mNow = fireModeOf(wNow);
+
+    // 一组连发按节奏吐完。冷却从**最后一发**开始算——
+    // 若从第一发就开始算，0.15s 的冷却在组内就跑完了，下一组会直接接上，
+    // 三连发就变成了每秒十发的机枪
+    if (p.burstLeft > 0) {
+      p.burstT -= dt;
+      while (p.burstLeft > 0 && p.burstT <= 0) {
+        shoot(p);
+        p.burstLeft--;
+        if (p.burstLeft > 0) p.burstT += mNow.gap;
+        else p.fireCd = wNow.cd;
+      }
+    }
+
     if (mouse.down && p.fireCd <= 0 && game.state === "playing") {
-      shoot(p);
-      p.fireCd = WEAPONS[game.weapon].cd;
+      if (mNow.burst > 1) {
+        if (p.trigger) {
+          // 上一组还没吐完就按下的，这一下直接丢掉：
+          // 否则新组会顶掉旧组的余量，5 发子弹混在一起喷出去
+          p.trigger = false;
+          if (p.burstLeft <= 0) {
+            p.burstLeft = mNow.burst;
+            p.burstT = 0;
+          }
+        }
+      } else if (mNow.id === "auto") {
+        shoot(p);
+        p.fireCd = wNow.cd;
+      } else if (p.trigger) {
+        p.trigger = false;
+        shoot(p);
+        p.fireCd = wNow.cd;
+      }
     }
 
     // 相机：冲刺时故意追不上，冲完再把人送回中心
@@ -1530,6 +1603,16 @@
     ctx.textAlign = "left";
     ctx.fillText("HP " + Math.max(0, Math.ceil(p.hp)) + " / " + p.maxHp, bx, by + bh + 18);
 
+    // 当前武器与射击模式：切换时整行亮一下，M 键才不是盲按
+    var wHud = WEAPONS[game.weapon], mHud = fireModeOf(wHud);
+    var hot = p.modeFlash > 0;
+    ctx.font = "600 13px " + C.mono;
+    ctx.fillStyle = hot ? C.player : "rgba(150,190,225,0.75)";
+    ctx.fillText(wHud.cn + " · " + mHud.cn, bx, by + bh + 38);
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = "rgba(150,190,225," + (hot ? 0.95 : 0.62) + ")";
+    ctx.fillText(wHud.modes.length > 1 ? "M 切换" : "固定模式", bx, by + bh + 55);
+
     ctx.textAlign = "right";
     ctx.font = "700 26px " + C.mono;
     ctx.fillStyle = C.text;
@@ -2073,6 +2156,11 @@
         else if (game.screen === "equip") { game.screen = "home"; game.pageT = 0; menuLayout(); }
         else { game.screen = "mode"; game.hoverId = null; game.pageT = 0; menuLayout(); }
       }
+      return;
+    }
+
+    if (e.code === "KeyM" && (game.state === "playing" || game.state === "paused")) {
+      cycleFireMode();
       return;
     }
 
