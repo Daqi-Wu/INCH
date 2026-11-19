@@ -73,9 +73,9 @@
     { id: "al11", cn: "AL-11", en: "LASER PISTOL",
       dmg: 52, cd: 0.25, spread: 0.0157, speed: 1000, range: 800, r: 2.8, kick: 0.8 },
     { id: "al15", cn: "AL-15", en: "LASER SMG",
-      dmg: 13, cd: 0.060, spread: 0.0649, speed: 1500, range: 700, r: 2.8, kick: 1.7 },
+      dmg: 13, cd: 0.052, spread: 0.0611, speed: 1500, range: 800, r: 2.8, kick: 1.6 },
     { id: "al18", cn: "AL-18", en: "LASER RIFLE",
-      dmg: 32, cd: 0.15, spread: 0.020, speed: 1100, range: 935, r: 3.2, kick: 1.6 }
+      dmg: 32, cd: 0.15, spread: 0.020, speed: 1100, range: 935, r: 3.2, kick: 1.4 }
   ];
 
   var MODES = [
@@ -1788,7 +1788,7 @@
 
     var rows = [
       ["伤害", String(wp.dmg)],
-      ["间隔", wp.cd.toFixed(2) + "s"],
+      ["间隔", (wp.cd < 0.1 ? wp.cd.toFixed(3) : wp.cd.toFixed(2)) + "s"],
       ["散布", (wp.spread * 180 / Math.PI).toFixed(1) + "°"],
       ["弹速", String(wp.speed)],
       ["射程", wp.range + "px"]
