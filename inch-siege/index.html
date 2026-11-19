@@ -108,8 +108,14 @@
 
   var MODES = [
     { id: "classic", cn: "经典围城", en: "SIEGE" },
-    { id: "solo", cn: "单人围城", en: "SAFEHOUSE" }
+    { id: "solo", cn: "单人围城", en: "SAFEHOUSE" },
+    { id: "blitz", cn: "快速围城", en: "BLITZ" }
   ];
+
+  // 快速围城 = 单人围城的压缩版：第 N 关用第 5N 关的内容，刷新节奏 ×5
+  var BLITZ_RATE = 5;
+  function isHouse() { return game.mode === "solo" || game.mode === "blitz"; }
+  function levelEq() { return game.mode === "blitz" ? game.level * BLITZ_RATE : game.level; }
 
   var SAFE_SCALE = 1.5;   // 安全屋地图 = 1.5 屏，视野占 2/3
   var HOME_AIM = 2.50;    // 首页主角的端枪角度：固定指向左下，不跟鼠标转
@@ -175,7 +181,7 @@
   // mode：两张模式卡 + 开始游戏 + 底部操作提示
   // 每页布局都写进 game.ui，鼠标只按 id 派发，不再维护焦点下标
   var EQ_MAXW = 210, EQ_H = 288;
-  var MD_W = 320, MD_H = 146;
+  var MD_W = 320, MD_H = 236;
   var BTN_START_H = 64, BTN_START_GAP = 48;
 
   function menuLayout() {
@@ -259,14 +265,16 @@
   }
 
   function layoutMode(list) {
-    var gap = 28;
-    var x0 = W / 2 - (MD_W * 2 + gap) / 2;
+    var gap = 22, n = MODES.length;
+    var mw = clamp((W - 96 - gap * (n - 1)) / n, 226, MD_W);
+    var x0 = W / 2 - (mw * n + gap * (n - 1)) / 2;
     // 卡片 + 间距 + 按钮作为一个整体居中，而不是只居中卡片
     var blockH = MD_H + BTN_START_GAP + BTN_START_H;
     var y0 = H * 0.5 - blockH / 2 - 12;
     list.push({ id: "backHome", kind: "nav", target: "home", x: W - 48 - 104, y: 40, w: 104, h: 42 });
-    list.push({ id: "mode0", kind: "mode", idx: 0, x: x0, y: y0, w: MD_W, h: MD_H });
-    list.push({ id: "mode1", kind: "mode", idx: 1, x: x0 + MD_W + gap, y: y0, w: MD_W, h: MD_H });
+    for (var i = 0; i < n; i++) {
+      list.push({ id: "mode" + i, kind: "mode", idx: i, x: x0 + i * (mw + gap), y: y0, w: mw, h: MD_H });
+    }
     list.push({ id: "start", kind: "start", x: W / 2 - 160, y: y0 + MD_H + BTN_START_GAP, w: 320, h: BTN_START_H });
   }
 
@@ -394,7 +402,7 @@
   }
 
   function refreshWalls(base) {
-    var active = game.level <= 2 ? 1 : (game.level <= 4 ? 2 : 3);
+    var active = levelEq() <= 2 ? 1 : (levelEq() <= 4 ? 2 : 3);
     var list = base ? base.slice() : [];
     if (!base) {
       var a = buildSafehouse();
@@ -469,7 +477,7 @@
 
   // 返回下一个该去的格子中心；返回 null 表示「直接冲玩家」
   function navTarget(e) {
-    if (!NAV || game.mode !== "solo") return null;
+    if (!NAV || !isHouse()) return null;
     var c = NAV.c, cols = NAV.cols, rows = NAV.rows;
     var cc = clamp(Math.floor(e.x / c), 0, cols - 1);
     var cr = clamp(Math.floor(e.y / c), 0, rows - 1);
@@ -635,9 +643,9 @@
   // ---------- 波次 / 关卡 ----------
   function pickType() {
     var roll = Math.random();
-    var lv = game.mode === "solo" ? game.level : game.wave;
+    var lv = game.mode === "classic" ? game.wave : levelEq();
     // 第 7 关起单独一套权重：炮手 16% / 重装 8% / 快速 18% / 追击 58%
-    if (game.mode === "solo" && lv >= 7) {
+    if (isHouse() && lv >= 7) {
       if (roll > 0.84) return "gunner";
       if (roll > 0.76) return "tank";
       if (roll > 0.58) return "fast";
@@ -661,14 +669,14 @@
 
   function startSoloLevel() {
     refreshWalls(null);
-    var n = 6 + game.level * 2;
+    var n = 6 + levelEq() * 2;
     var q = [];
     for (var i = 0; i < n; i++) q.push(pickType());
     game.spawnQueue = q;
-    game.spawnTimer = 1.0;
+    game.spawnTimer = game.mode === "blitz" ? 0.2 : 1.0;
 
     // 小队从上方那个专用门进场，一次把这一关的队都放出来（各自错开一点）
-    var sq = squadsForLevel(game.level);
+    var sq = squadsForLevel(levelEq());
     for (var s2 = 0; s2 < sq; s2++) spawnSquad(game.spawns[SQUAD_GATE], s2);
     game.banner = "第 " + pad2(game.level) + " 关";
     game.bannerTime = 1.6;
@@ -813,7 +821,7 @@
     game.enemies.splice(idx, 1);
     // 清场之后才开始计时：波间 2.0s / 关间 1.2s
     if (game.enemies.length === 0 && game.spawnQueue.length === 0) {
-      game.spawnTimer = game.mode === "classic" ? 2.0 : 1.2;
+      game.spawnTimer = game.mode === "classic" ? 2.0 : (game.mode === "blitz" ? 1.2 / BLITZ_RATE : 1.2);
     }
   }
 
@@ -990,7 +998,7 @@
 
     // 敌人
     var px = p.x, py = p.y;
-    if (game.mode === "solo") updateField();
+    if (isHouse()) updateField();
 
     // 小队先更新状态：谁在推进、要不要后撤
     for (var sid in game.squads) squadTick(game.squads[sid], dt);
@@ -1049,7 +1057,7 @@
         }
 
         if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
-        moveCircle(e, mvx * dt, mvy * dt, game.mode !== "solo");
+        moveCircle(e, mvx * dt, mvy * dt, !isHouse());
 
         // 横移撞墙就换个方向绕，不然它会贴着墙左右抖
         e.strafeCd = Math.max(0, e.strafeCd - dt);
@@ -1068,7 +1076,7 @@
       if (e.emerge <= 0 && e.aware && pdd < rr * rr) {
         var pdx = Math.sqrt(pdd) || 1;
         var kx = (e.x - px) / pdx, ky = (e.y - py) / pdx;
-        moveCircle(e, kx * (rr - pdx), ky * (rr - pdx), game.mode !== "solo");
+        moveCircle(e, kx * (rr - pdx), ky * (rr - pdx), !isHouse());
         if (e.hitCd <= 0 && p.invuln <= 0 && p.dashTime <= 0) {
           p.hp -= e.dmg;
           p.invuln = 0.55;
@@ -1142,17 +1150,17 @@
           if (game.mode === "classic") {
             spawnEnemy(game.spawnQueue.shift());
           } else {
-            var nAct = game.level <= 2 ? 1 : (game.level <= 4 ? 2 : 3);
+            var nAct = levelEq() <= 2 ? 1 : (levelEq() <= 4 ? 2 : 3);
             var active = [];
             for (var ai = 0; ai < nAct; ai++) {
-              if (game.level >= 10 && ai === SQUAD_GATE) continue;   // 这道门只走小队
+              if (levelEq() >= 10 && ai === SQUAD_GATE) continue;   // 这道门只走小队
               active.push(game.spawns[ai]);
             }
             if (!active.length) active = [game.spawns[0]];
             spawnEnemy(game.spawnQueue.shift(), active[Math.floor(Math.random() * active.length)]);
           }
         }
-        game.spawnTimer = game.mode === "solo" ? 1.6 : rand(0.28, 0.6);
+        game.spawnTimer = !isHouse() ? rand(0.28, 0.6) : (game.mode === "blitz" ? 1.6 / BLITZ_RATE : 1.6);
       }
       return;
     }
@@ -1217,15 +1225,15 @@
   }
 
   function drawThresholds() {
-    if (game.mode !== "solo") return;
+    if (!isHouse()) return;
     var active = game.level <= 2 ? 1 : (game.level <= 4 ? 2 : 3);
-    var squadLevel = game.level >= 10 && squadsForLevel(game.level) > 0;
+    var squadLevel = levelEq() >= 10 && squadsForLevel(levelEq()) > 0;
     for (var i = 0; i < active; i++) {
       // 敌军专用那道门：这一关没有小队就不开
-      if (i === SQUAD_GATE && game.level >= 10 && !squadLevel) continue;
+      if (i === SQUAD_GATE && levelEq() >= 10 && !squadLevel) continue;
       var s = game.spawns[i];
       var a = 0.12 + Math.sin(game.timeAlive * 2.4 + i) * 0.08;
-      ctx.fillStyle = (i === SQUAD_GATE && game.level >= 10)
+      ctx.fillStyle = (i === SQUAD_GATE && levelEq() >= 10)
         ? "rgba(255,77,141," + (a + 0.10) + ")"
         : "rgba(255,91,91," + a + ")";
       if (s.ix === 0) ctx.fillRect(s.x - 48, s.iy > 0 ? 16 : game.mapH - 28, 96, 12);
@@ -1899,7 +1907,7 @@
 
   // 关卡表：10、15、20… 每 5 关一次；队数每 10 关 +1
   function squadsForLevel(lv) {
-    if (game.mode !== "solo" || lv < 10 || lv % 5 !== 0) return 0;
+    if (!isHouse() || lv < 10 || lv % 5 !== 0) return 0;
     return 1 + Math.floor((lv - 10) / 10);
   }
 
@@ -2070,7 +2078,7 @@
       ctx.fillText(game.banner, W / 2, H * 0.24);
       ctx.font = "500 13px " + C.mono;
       ctx.fillStyle = "rgba(150,200,235,0.85)";
-      ctx.fillText(game.mode === "solo" ? "SAFEHOUSE" : "ENEMIES INCOMING", W / 2, H * 0.24 + 26);
+      ctx.fillText(game.mode === "solo" ? "SAFEHOUSE" : (game.mode === "blitz" ? "BLITZ" : "ENEMIES INCOMING"), W / 2, H * 0.24 + 26);
       ctx.restore();
     }
   }
@@ -2264,7 +2272,9 @@
 
     var a = uiById("toEquip"), b = uiById("toMode");
     if (a) drawNavButton(a, "装备选择", "EQUIPMENT", WEAPONS[game.weapon].cn);
-    if (b) drawNavButton(b, "模式选择", "MODE", MODES[game.mode === "classic" ? 0 : 1].cn);
+    var mi = 0;
+    for (var mm = 0; mm < MODES.length; mm++) if (MODES[mm].id === game.mode) mi = mm;
+    if (b) drawNavButton(b, "模式选择", "MODE", MODES[mi].cn);
   }
 
   function drawEquip() {
@@ -2359,24 +2369,107 @@
     ctx.fillText(text, W / 2, H - 48);
   }
 
+  // 模式卡照装备卡的版式来：上面一张示意图，下面型号 + 三行数值，同一套位置
+  function drawModeMap(cx, cy, id) {
+    var house = id !== "classic";
+    var w = house ? 148 : 96, h = 62;
+    var x = cx - w / 2, y = cy - h / 2;
+
+    // 地图框
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(140,190,225,0.45)";
+    ctx.strokeRect(x, y, w, h);
+
+    if (!house) {
+      // 经典：地图 = 一屏 = 视野，四面来敌
+      var m = 9;
+      ctx.strokeStyle = "rgba(255,91,91,0.55)";
+      ctx.lineWidth = 1.5;
+      var arr = [[x + w / 2, y - m, 0, 1], [x + w / 2, y + h + m, 0, -1],
+                 [x - m, y + h / 2, 1, 0], [x + w + m, y + h / 2, -1, 0]];
+      for (var i = 0; i < arr.length; i++) {
+        var ax = arr[i][0], ay = arr[i][1], dx = arr[i][2], dy = arr[i][3];
+        ctx.beginPath();
+        ctx.moveTo(ax - dx * 7, ay - dy * 7);
+        ctx.lineTo(ax, ay);
+        ctx.stroke();
+      }
+    } else {
+      // 安全屋：1.5 屏地图 + 2/3 屏视野 + 三个门
+      var vw = w * 0.62, vh = h * 0.62;
+      var vx = x + (w - vw) / 2, vy = y + (h - vh) / 2;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = "rgba(124,231,255,0.55)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(vx, vy, vw, vh);
+      ctx.setLineDash([]);
+
+      // 三处入口：上、左、右（左边那道是敌军专用，画品红）
+      var gx = [x + w / 2, x, x + w], gy = [y, y + h / 2, y + h / 2];
+      for (var k = 0; k < 3; k++) {
+        ctx.fillStyle = (k === 1) ? "rgba(255,77,141,0.85)" : "rgba(255,91,91,0.75)";
+        if (k === 0) ctx.fillRect(gx[k] - 9, gy[k] - 1.5, 18, 3);
+        else ctx.fillRect(gx[k] - (k === 1 ? 1.5 : 0), gy[k] - 9, 3, 18);
+      }
+
+      // 玩家
+      ctx.beginPath();
+      ctx.arc(x + w / 2, y + h * 0.68, 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = C.player;
+      ctx.fill();
+
+      // 快速：三组小箭头表示"涌入更急"
+      if (id === "blitz") {
+        ctx.strokeStyle = "rgba(255,209,102,0.85)";
+        ctx.lineWidth = 1.2;
+        for (var q = 0; q < 3; q++) {
+          ctx.beginPath();
+          ctx.moveTo(x + 18 + q * 5, y + h - 10);
+          ctx.lineTo(x + 22 + q * 5, y + h - 14);
+          ctx.lineTo(x + 18 + q * 5, y + h - 18);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
   function drawModeCard(u, m) {
     var on = game.mode === m.id;
     withPress(u, function () {
     cardBg(u, on);
 
-    ctx.textAlign = "left";
-    ctx.font = "700 24px " + C.mono;
-    ctx.fillStyle = C.text;
-    ctx.fillText(m.cn, u.x + 24, u.y + 52);
-    ctx.font = "500 10px " + C.mono;
-    ctx.fillStyle = on ? C.player : C.text2;
-    ctx.letterSpacing = "0.20em";
-    ctx.fillText(m.en, u.x + 25, u.y + 74);
-    ctx.letterSpacing = "0px";
-    ctx.font = "500 12px " + C.mono;
-    ctx.fillStyle = "rgba(160,190,215,0.78)";
-    ctx.fillText(m.id === "classic" ? "无尽波次 · 视野即全图" : "安全屋 · 三处入口 · 逐关推进", u.x + 24, u.y + 110);
+    drawModeMap(u.x + u.w / 2, u.y + 62, m.id);
 
+    ctx.textAlign = "left";
+    ctx.font = "700 17px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(m.cn, u.x + 18, u.y + 118);
+    ctx.font = "500 9px " + C.mono;
+    ctx.fillStyle = on ? C.player : C.text2;
+    ctx.letterSpacing = "0.16em";
+    ctx.fillText(m.en, u.x + 19, u.y + 133);
+    ctx.letterSpacing = "0px";
+
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(u.x + 18, u.y + 145, u.w - 36, 1);
+
+    var rows = m.id === "classic"
+      ? [["地图", "一屏"], ["视野", "全图"], ["节奏", "无尽波次"]]
+      : (m.id === "blitz"
+        ? [["地图", "1.5 屏"], ["视野", "2/3 屏"], ["节奏", "五倍刷新"]]
+        : [["地图", "1.5 屏"], ["入口", "三处"], ["节奏", "逐关推进"]]);
+    for (var i = 0; i < rows.length; i++) {
+      var ry = u.y + 166 + i * 22;
+      ctx.textAlign = "left";
+      ctx.font = "500 11px " + C.mono;
+      ctx.fillStyle = "rgba(160,190,215,0.78)";
+      ctx.fillText(rows[i][0], u.x + 18, ry);
+      ctx.textAlign = "right";
+      ctx.font = "600 11px " + C.mono;
+      ctx.fillStyle = on ? C.player : C.text;
+      ctx.fillText(rows[i][1], u.x + u.w - 18, ry);
+    }
+    ctx.textAlign = "left";
     drawSelDot(u, on);
     });
   }
