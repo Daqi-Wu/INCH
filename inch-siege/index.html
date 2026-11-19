@@ -63,7 +63,8 @@
   var TYPES = {
     chaser: { r: 15, hp: 30, speed: 100, dmg: 12, score: 10, color: "#ff5b5b", glow: "#ff9b9b" },
     fast:   { r: 10, hp: 16, speed: 190, dmg: 8,  score: 15, color: "#ffd166", glow: "#fff0b8" },
-    tank:   { r: 26, hp: 130, speed: 58, dmg: 22, score: 30, color: "#a06bff", glow: "#d6c2ff" }
+    tank:   { r: 26, hp: 130, speed: 58, dmg: 22, score: 30, color: "#a06bff", glow: "#d6c2ff" },
+    gunner: { r: 16, hp: 42,  speed: 72, dmg: 10, score: 22, color: "#ff8a3d", glow: "#ffcba6" }
   };
 
   // 两件激光装备：DPS 几乎相同，形状不同
@@ -93,6 +94,7 @@
     ui: [],
     player: null,
     bullets: [],
+    foes: [],
     enemies: [],
     particles: [],
     pickups: [],
@@ -456,6 +458,7 @@
     game.hoverId = null;
     game.player = makePlayer();
     game.bullets = [];
+    game.foes = [];
     game.enemies = [];
     game.particles = [];
     game.pickups = [];
@@ -525,11 +528,17 @@
   // ---------- 波次 / 关卡 ----------
   function pickType() {
     var roll = Math.random();
-    var t = "chaser";
     var lv = game.mode === "solo" ? game.level : game.wave;
-    if (lv >= 3 && roll > 0.72) t = "fast";
-    if (lv >= 4 && roll > 0.9) t = "tank";
-    return t;
+    // 第 7 关起单独一套权重：炮手 16% / 重装 8% / 快速 18% / 追击 58%
+    if (game.mode === "solo" && lv >= 7) {
+      if (roll > 0.84) return "gunner";
+      if (roll > 0.76) return "tank";
+      if (roll > 0.58) return "fast";
+      return "chaser";
+    }
+    if (lv >= 4 && roll > 0.9) return "tank";
+    if (lv >= 3 && roll > 0.72) return "fast";
+    return "chaser";
   }
 
   function startClassicWave() {
@@ -555,6 +564,7 @@
   }
 
   function spawnEnemy(typeName, point) {
+    if (typeName === "gunner" && countType("gunner") >= 3) typeName = "chaser";
     var t = TYPES[typeName];
     var lv = game.mode === "solo" ? game.level : game.wave;
     var scale = 1 + (lv - 1) * 0.17;
@@ -573,6 +583,11 @@
       vx: 0, vy: 0,
       wobble: rand(0, Math.PI * 2),
       emerge: 0,
+      charge: -1,                        // >=0 表示正在蓄能，值是已蓄秒数
+      aim: 0,
+      fireCd: 0.9 + rand(0, 0.9),
+      strafe: Math.random() < 0.5 ? 1 : -1,
+      strafeCd: 0,
       blockX: false, blockY: false,
       wallX: null, wallY: null
     };
@@ -748,6 +763,39 @@
       }
     }
 
+    // 敌弹：分 3 个子步，撞墙碎裂、贴身命中玩家
+    for (var fi = game.foes.length - 1; fi >= 0; fi--) {
+      var fo = game.foes[fi];
+      var foeDone = false;
+      for (var fs = 0; fs < 3 && !foeDone; fs++) {
+        fo.x += fo.vx * dt / 3;
+        fo.y += fo.vy * dt / 3;
+        if (game.walls.length && wallAt(fo.x, fo.y, fo.r)) {
+          burst(fo.x, fo.y, "rgba(255,186,130,0.9)", 4, 130);
+          foeDone = true;
+          break;
+        }
+        var fr = fo.r + p.r;
+        if (p.invuln <= 0 && p.dashTime <= 0 &&
+            dist2(fo.x, fo.y, p.x, p.y) < fr * fr) {
+          p.hp -= fo.dmg;
+          p.invuln = 0.45;
+          game.shake = Math.min(game.shake + 7, 16);
+          game.hitFlash = 0.5;
+          burst(p.x, p.y, "#ff8a3d", 12, 200);
+          moveCircle(p, fo.vx * 0.012, fo.vy * 0.012);
+          foeDone = true;
+          if (p.hp <= 0) { die(); return; }
+        }
+      }
+      fo.life -= dt;
+      if (foeDone) { game.foes.splice(fi, 1); continue; }
+      if (fo.life <= 0 || fo.x < -60 || fo.x > game.mapW + 60 ||
+          fo.y < -60 || fo.y > game.mapH + 60) {
+        game.foes.splice(fi, 1);
+      }
+    }
+
     // 敌人
     var px = p.x, py = p.y;
     if (game.mode === "solo") updateField();
@@ -777,13 +825,34 @@
         }
       }
 
-      var wob = Math.sin(e.wobble) * 0.28;
-      var mvx = nx * e.speed + sepX + (-ny) * wob * e.speed * 0.5 + e.vx;
-      var mvy = ny * e.speed + sepY + (nx) * wob * e.speed * 0.5 + e.vy;
+      var mvx, mvy;
+      if (e.type === "gunner") {
+        // 距离带按到玩家的直线距离算：d 是到寻路路点的距离，不能拿来判距
+        var pd = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+        gunnerThink(e, p, dt, pd, nx, ny);
+        var slow = e.charge >= 0 ? 0.25 : 1;              // 蓄能时几乎站定，给玩家反打的窗口
+        var gx2 = 0, gy2 = 0;
+        if (pd > GUNNER.far) { gx2 = nx; gy2 = ny; }              // 太远：靠过去（走 BFS 方向，会绕墙）
+        else if (pd < GUNNER.near) { gx2 = -nx; gy2 = -ny; }      // 太近：退开（背对玩家，撞墙就滑）
+        else { gx2 = -ny * e.strafe; gy2 = nx * e.strafe; }       // 带内：横移，只改角度不改距离
+        mvx = gx2 * e.speed * slow + sepX + e.vx;
+        mvy = gy2 * e.speed * slow + sepY + e.vy;
+      } else {
+        var wob = Math.sin(e.wobble) * 0.28;
+        mvx = nx * e.speed + sepX + (-ny) * wob * e.speed * 0.5 + e.vx;
+        mvy = ny * e.speed + sepY + (nx) * wob * e.speed * 0.5 + e.vy;
+      }
 
       if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
 
       moveCircle(e, mvx * dt, mvy * dt, game.mode !== "solo");
+
+      // 横移撞墙就换个方向绕，不然它会贴着墙左右抖
+      e.strafeCd = Math.max(0, e.strafeCd - dt);
+      if (e.type === "gunner" && e.charge < 0 && e.strafeCd <= 0 && (e.blockX || e.blockY)) {
+        e.strafe = -e.strafe;
+        e.strafeCd = 0.4;
+      }
 
       e.vx *= Math.pow(0.0025, dt);
       e.vy *= Math.pow(0.0025, dt);
@@ -1234,6 +1303,102 @@
     ctx.stroke();
   }
 
+  // ---------- 炮手 ----------
+  // 中距离压迫：不贴身，只在 240–420 的带里横移、蓄能、放一发弹。
+  // 它的全部威胁来自"你不敢停下来"——所以要给它一个看得见的起手式：
+  // 蓄能 0.75s（站桩 + 外圈走一圈）→ 0.55s 起瞄准线定死 → 再 0.2s 才发。
+  var GUNNER = {
+    near: 240, far: 420,
+    charge: 0.75,
+    lock: 0.55,
+    cdMin: 2.0, cdMax: 2.6,
+    speed: 430, r: 6, dmg: 14, life: 3.2
+  };
+
+  function countType(t) {
+    var n = 0;
+    for (var i = 0; i < game.enemies.length; i++) if (game.enemies[i].type === t) n++;
+    return n;
+  }
+
+  // 视口内：安全屋视野只有 2/3，看不见的地方不许开火
+  function onScreen(x, y, pad) {
+    var sx = x - game.cam.x, sy = y - game.cam.y;
+    return sx > -pad && sx < W + pad && sy > -pad && sy < H + pad;
+  }
+
+  // 视线：沿两点每 24px 采一次墙
+  function losClear(x1, y1, x2, y2) {
+    if (!game.walls.length) return true;
+    var n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 24);
+    for (var i = 1; i < n; i++) {
+      var k = i / n;
+      if (wallAt(x1 + (x2 - x1) * k, y1 + (y2 - y1) * k, 2)) return false;
+    }
+    return true;
+  }
+
+  function gunnerThink(e, p, dt, d, nx, ny) {
+    var seen = onScreen(e.x, e.y, 40) && losClear(e.x, e.y, p.x, p.y);
+    if (e.charge >= 0) {
+      e.charge += dt;
+      if (e.charge <= GUNNER.lock) e.aim = Math.atan2(p.y - e.y, p.x - e.x);
+      if (e.charge >= GUNNER.charge) {
+        fireFoe(e);
+        e.charge = -1;
+        e.fireCd = rand(GUNNER.cdMin, GUNNER.cdMax);
+      }
+      return;
+    }
+    e.fireCd -= dt;
+    if (e.fireCd > 0) return;
+    if (!seen || d < GUNNER.near || d > GUNNER.far + 60) { e.fireCd = 0.3; return; }
+    e.charge = 0;
+    e.aim = Math.atan2(p.y - e.y, p.x - e.x);
+  }
+
+  function fireFoe(e) {
+    var a = e.aim, c = Math.cos(a), s2 = Math.sin(a);
+    var mx = e.x + c * (e.r + 6), my = e.y + s2 * (e.r + 6);
+    game.foes.push({
+      x: mx, y: my,
+      vx: c * GUNNER.speed, vy: s2 * GUNNER.speed,
+      r: GUNNER.r, life: GUNNER.life, dmg: GUNNER.dmg, ang: a
+    });
+    burst(mx, my, "#ff8a3d", 5, 140);
+    game.shake = Math.min(game.shake + 2, 9);
+  }
+
+  // 敌弹画成菱形飞镖：玩家的子弹是圆点，靠形状区分敌我，不只靠颜色
+  function drawFoes() {
+    for (var i = 0; i < game.foes.length; i++) {
+      var f = game.foes[i];
+      ctx.beginPath();
+      ctx.moveTo(f.x - f.vx * 0.03, f.y - f.vy * 0.03);
+      ctx.lineTo(f.x, f.y);
+      ctx.strokeStyle = "rgba(255,138,61,0.42)";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.ang);
+      ctx.beginPath();
+      ctx.moveTo(f.r * 1.25, 0);
+      ctx.lineTo(0, f.r * 0.78);
+      ctx.lineTo(-f.r * 0.9, 0);
+      ctx.lineTo(0, -f.r * 0.78);
+      ctx.closePath();
+      ctx.fillStyle = "#ff8a3d";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(46,14,4,0.85)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   function drawEnemy(e) {
     var sc = e.emerge > 0 ? 1 - (e.emerge / 0.45) * 0.6 : 1;
     var al = e.emerge > 0 ? 1 - (e.emerge / 0.45) * 0.55 : 1;
@@ -1262,16 +1427,39 @@
     drawEnemyEye(e.r, -e.r * 0.33, -e.r * 0.06, 1);
     drawEnemyEye(e.r, e.r * 0.33, -e.r * 0.06, -1);
 
+    // 蓄能环：外圈走一圈就是全部预告，走满即发
+    if (e.type === "gunner" && e.charge >= 0) {
+      var cp = clamp(e.charge / GUNNER.charge, 0, 1);
+      ctx.beginPath();
+      ctx.arc(0, 0, e.r + 7, -Math.PI / 2, -Math.PI / 2 + cp * Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,138,61," + (0.5 + cp * 0.45) + ")";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // 锁定后半段才出瞄准线：线一出现，就说明"别站着了"
+      if (e.charge > GUNNER.lock) {
+        var la = (e.charge - GUNNER.lock) / (GUNNER.charge - GUNNER.lock);
+        var ca = Math.cos(e.aim), sa = Math.sin(e.aim);
+        ctx.beginPath();
+        ctx.moveTo(ca * (e.r + 8), sa * (e.r + 8));
+        ctx.lineTo(ca * 620, sa * 620);
+        ctx.strokeStyle = "rgba(255,138,61," + (0.10 + la * 0.22) + ")";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
     if (e.hp < e.maxHp) {
       var w = e.r * 2;
+      var barY = -e.r - (e.type === "gunner" ? 14 : 9);   // 炮手上方要留出蓄能环
       ctx.fillStyle = "rgba(0,0,0,0.55)";
-      ctx.fillRect(-w / 2, -e.r - 9, w, 4);
+      ctx.fillRect(-w / 2, barY, w, 4);
       ctx.fillStyle = "#ff5b5b";
-      ctx.fillRect(-w / 2, -e.r - 9, w * (e.hp / e.maxHp), 4);
+      ctx.fillRect(-w / 2, barY, w * (e.hp / e.maxHp), 4);
       if (e.r > 20) {
         ctx.strokeStyle = "rgba(0,0,0,0.6)";
         ctx.lineWidth = 1;
-        ctx.strokeRect(-w / 2 - 0.5, -e.r - 9.5, w + 1, 5);
+        ctx.strokeRect(-w / 2 - 0.5, barY - 0.5, w + 1, 5);
       }
     }
     ctx.restore();
@@ -1809,6 +1997,8 @@
       }
 
       for (var m = 0; m < game.enemies.length; m++) drawEnemy(game.enemies[m]);
+
+      drawFoes();
 
       if (game.player && game.state !== "over") drawPlayer(game.player);
 
