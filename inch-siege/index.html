@@ -76,7 +76,7 @@
   // burst + gap 表示一组几发、组内间隔多长（AL-18 三连发：3 发在 0.4s 内出完）。
   var WEAPONS = [
     { id: "al08", cn: "AL-08", en: "LASER RIFLE",
-      dmg: 25, cd: 0.20, spread: 0.0227, speed: 950, range: 800, r: 3.2, kick: 1.6,
+      dmg: 25, cd: 0.30, spread: 0.0227, speed: 950, range: 800, r: 3.2, kick: 1.6,
       holdBurst: true,                     // 只有三连发，按住就一轮接一轮
       modes: [
         { id: "burst", cn: "三连发", spread: 0.0227, burst: 3, gap: 0.4 / 3 }
@@ -1248,7 +1248,7 @@
   // 三把枪是同一个家族的三种口径：长度、机匣厚度，加一块附属件
   // AL-11 手枪（最短，光板） / AL-15 冲锋枪（中段挂弹匣） / AL-18 步枪（最长，背上一条瞄轨）
   var GUNART = {
-    al10: { len: 0.92, H: 0.30, gh: 0.32, rail: false, fore: false },
+    al10: { len: 0.80, H: 0.30, gh: 0.32, rail: false, fore: false },
     al08: { len: 1.66, H: 0.26, gh: 0.36, rail: true,  fore: false },
     al11: { len: 1.06, H: 0.30, gh: 0.33, rail: false, fore: false },
     al15: { len: 1.26, H: 0.28, gh: 0.34, rail: false, fore: true },
@@ -1677,7 +1677,7 @@
     detect: 380,          // 士兵的发现距离（比围城敌人的 500 更近）
     raise: 0.35,          // 移动中举枪的时间：掩护位没有这个延迟
     burstGap: 0.4 / 3,    // 组内 3 发在 0.4s 内出完
-    interBurst: 0.2,
+    interBurst: 0.3,
     ammo: 7,              // 一轮 7 发
     cd: 0.5,              // 打完冷却
     armor: 0.6,           // 围城敌人对士兵的伤害系数
@@ -1928,7 +1928,7 @@
     if (e.type === "soldier") {
       ctx.save();
       ctx.rotate(e.aim || 0);
-      drawGun(e.r * 0.9, e.gun || "al10", 0, (e.muzzle || 0) > 0 ? 0.05 : 0, 0.9, e.r * 0.66);
+      drawGun(e.r * 1.05, e.gun || "al10", 0, (e.muzzle || 0) > 0 ? 0.05 : 0, 1.05, e.r * 0.70);
       ctx.restore();
     }
 
