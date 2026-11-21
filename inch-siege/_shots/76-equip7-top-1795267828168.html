@@ -1,0 +1,2882 @@
+<!-- INCH · SIEGE / v1.3 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方寸-围城</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #05070c; }
+  body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; cursor: none; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+  "use strict";
+
+  // ---------- 色板 ----------
+  var C = {
+    bg0: "#101728", bg1: "#0a0e18", bg2: "#05070c",
+    grid: "rgba(90,130,190,0.075)",
+    player: "#7ce7ff",
+    gain: "#5df2a0",
+    text: "#eaf6ff",
+    text2: "rgba(180,205,230,0.7)",
+    panel: "rgba(255,255,255,0.09)",
+    line: "rgba(255,255,255,0.18)",
+    wall: "rgba(2,6,12,0.55)",
+    wallEdge: "rgba(140,235,255,0.25)",
+    mono: 'ui-monospace, Consolas, monospace'
+  };
+
+  // ---------- 画布 ----------
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (game.state === "menu") { menuLayout(); return; }
+    if (game.state === "paused") { layoutArena(); pauseLayout(); return; }
+    layoutArena();
+  }
+  window.addEventListener("resize", resize);
+
+  // ---------- 工具 ----------
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function dist2(ax, ay, bx, by) { var dx = ax - bx, dy = ay - by; return dx * dx + dy * dy; }
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+
+  // ---------- 数据 ----------
+  var TYPES = {
+    chaser: { r: 15, hp: 95,  speed: 100, dmg: 15, score: 10, color: "#ff5b5b", glow: "#ff9b9b" },
+    fast:   { r: 10, hp: 50,  speed: 190, dmg: 10, score: 15, color: "#ffd166", glow: "#fff0b8" },
+    tank:   { r: 26, hp: 160, speed: 58,  dmg: 25, score: 30, color: "#a06bff", glow: "#d6c2ff" },
+    gunner: { r: 16, hp: 110, speed: 72,  dmg: 5,  score: 22, color: "#ff8a3d", glow: "#ffcba6" },
+    soldier:{ r: 14, hp: 80,  speed: 105, dmg: 6,  score: 25, color: "#ff4d8d", glow: "#ffb3cc" }
+  };
+
+  // 三件激光武器，同一个家族。名字就是型号，卡片上只显示型号。
+  // 平衡只看三个数：单发伤害、间隔、射程；散布与弹速管手感，弹径管视觉。
+  //
+  // modes 是这把枪能切的射击模式，M 键循环。每个模式自带 spread：
+  // 单发/三连发收束得更紧，是对"不能泼水"的补偿。
+  // burst + gap 表示一组几发、组内间隔多长（AL-18 三连发：3 发在 0.4s 内出完）。
+  var WEAPONS = [
+    { id: "al08", cn: "AL-08", en: "LASER RIFLE",
+      dmg: 25, cd: 0.30, spread: 0.0227, speed: 950, range: 800, r: 3.2, kick: 1.6,
+      mag: 5000, reload: 0.8,
+      holdBurst: true,                     // 只有三连发，按住就一轮接一轮
+      modes: [
+        { id: "burst", cn: "三连发", spread: 0.0227, burst: 3, gap: 0.4 / 3 }
+      ] },
+    { id: "al10", cn: "AL-10", en: "LASER PISTOL",
+      dmg: 10, cd: 0.25, spread: 0.0227, speed: 700, range: 600, r: 2.8, kick: 1.2,
+      mag: 5000, reload: 0.8,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0227 }
+      ] },
+    { id: "al11", cn: "AL-11", en: "LASER PISTOL",
+      dmg: 52, cd: 0.25, spread: 0.0157, speed: 1000, range: 800, r: 2.8, kick: 0.8,
+      mag: 5000, reload: 0.8,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0157 },
+        { id: "semi", cn: "单发", spread: 0.0087 }
+      ] },
+    { id: "al15", cn: "AL-15", en: "LASER SMG",
+      dmg: 13, cd: 0.052, spread: 0.0611, speed: 1500, range: 800, r: 2.8, kick: 1.6,
+      mag: 5000, reload: 0.8,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0611 }
+      ] },
+    { id: "al18", cn: "AL-18", en: "LASER RIFLE",
+      dmg: 32, cd: 0.15, spread: 0.020, speed: 1100, range: 935, r: 3.2, kick: 1.4,
+      mag: 5000, reload: 0.8,
+      modes: [
+        { id: "auto",  cn: "连发",   spread: 0.020 },
+        { id: "semi",  cn: "单发",   spread: 0.0122 },
+        { id: "burst", cn: "三连发", spread: 0.0166, burst: 3, gap: 0.4 / 3, cd: 0.25 }
+      ] },
+    { id: "ae15", cn: "AE-15", en: "RAILGUN",
+      dmg: 36, cd: 0.22, spread: 0.0314, speed: 600, range: 1100, r: 4.2,
+      mag: 60, reload: 0.55,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0314, kick: 2.7 },
+        { id: "semi", cn: "单发", spread: 0.0244, kick: 1.8 }
+      ] },
+    { id: "ae25", cn: "AE-25", en: "RAILGUN",
+      dmg: 42, cd: 0.18, spread: 0.0262, speed: 800, range: 1400, r: 4.2,
+      mag: 60, reload: 0.55,
+      modes: [
+        { id: "auto", cn: "连发", spread: 0.0262, kick: 1.9 },
+        { id: "semi", cn: "单发", spread: 0.0087, kick: 1.4 }
+      ] }
+  ];
+
+  var MODES = [
+    { id: "classic", cn: "经典围城", en: "SIEGE" },
+    { id: "solo", cn: "单人围城", en: "SAFEHOUSE" },
+    { id: "blitz", cn: "快速围城", en: "BLITZ" }
+  ];
+
+  // 快速围城 = 单人围城的压缩版：第 N 关用第 5N 关的内容，刷新节奏 ×5
+  var BLITZ_RATE = 5;
+  function isHouse() { return game.mode === "solo" || game.mode === "blitz"; }
+  function levelEq() { return game.mode === "blitz" ? game.level * BLITZ_RATE : game.level; }
+
+  var SAFE_SCALE = 1.5;   // 安全屋地图 = 1.5 屏，视野占 2/3
+  var HOME_AIM = 2.50;    // 首页主角的端枪角度：固定指向左下，不跟鼠标转
+
+  var game = {
+    state: "menu",
+    screen: "home",          // 初始界面的三页：home / equip / mode
+    mode: "classic",
+    weapon: 2,          // 默认 AL-11（下标 2）；前面是 AL-08 / AL-10，别让人一上来就拿弱枪
+    fireMode: [],            // 每把枪各自记住上次选的模式（开局按武器数补零）
+    equipScroll: 0,          // 装备页纵向滚动量（窗口窄时启用）
+    ammo: [], reloadT: 0, reloadTime: 0.8,   // 每把枪各自的余弹（容量与换弹时间看 WEAPONS[i]）
+    squads: Object.create(null),
+    squadSeq: 0,
+    uidSeq: 0,
+    hoverId: null,
+    pressId: null,
+    pageT: 1,
+    ui: [],
+    player: null,
+    bullets: [],
+    foes: [],
+    enemies: [],
+    particles: [],
+    pickups: [],
+    walls: [],
+    gates: [],
+    spawns: [],
+    mapW: 0, mapH: 0,
+    cam: { x: 0, y: 0 },
+    score: 0,
+    wave: 0,
+    level: 1,
+    spawnQueue: [],
+    spawnTimer: 0,
+    banner: "",
+    bannerTime: 0,
+    shake: 0,
+    hitFlash: 0,
+    kills: 0,
+    timeAlive: 0
+  };
+
+  var keys = Object.create(null);
+  var mouse = { x: -99, y: -99, down: false };
+
+  function makePlayer() {
+    return {
+      x: 0, y: 0, r: 14, speed: 265,
+      hp: 100, maxHp: 100,
+      aim: 0, fireCd: 0, invuln: 0,
+      dashCd: 0, dashTime: 0, dashDirX: 0, dashDirY: 0,
+      muzzle: 0, recoil: 0,
+      combat: 0,                // 刚开过火的余温：>0 时嘴抿起来
+      trigger: true,            // 扳机是否已复位：单发/三连发必须松开再按
+      burstLeft: 0, burstT: 0,  // 一组连发还没吐完的余量
+      modeFlash: 0              // 切模式时 HUD 闪一下
+    };
+  }
+
+  // ---------- 初始界面：三页 ----------
+  // home：标题 + 持枪主角 + 左下「装备选择」+ 右下「模式选择」
+  // equip：两件装备与全部数值
+  // mode：两张模式卡 + 开始游戏 + 底部操作提示
+  // 每页布局都写进 game.ui，鼠标只按 id 派发，不再维护焦点下标
+  var EQ_MAXW = 210, EQ_H = 288;
+  var MD_W = 320, MD_H = 236;
+  var BTN_START_H = 64, BTN_START_GAP = 48;
+
+  function menuLayout() {
+    var list = [];
+    if (game.screen === "equip") layoutEquip(list);
+    else if (game.screen === "mode") layoutMode(list);
+    else layoutHome(list);
+    game.ui = list;
+  }
+
+  function layoutHome(list) {
+    var bw = 224, bh = 84, pad = 48;
+    list.push({ id: "toEquip", kind: "nav", target: "equip", x: pad, y: H - pad - bh, w: bw, h: bh });
+    list.push({ id: "toMode", kind: "nav", target: "mode", x: W - pad - bw, y: H - pad - bh, w: bw, h: bh });
+  }
+
+  // 装备页有两种排法：
+  //  - 够宽就横排（原样）
+  //  - 窄到每张卡放不下 250px，就改成纵向一列，靠滚轮翻
+  // 七把枪横排放不下（要 1674px），装备页固定纵向一列，靠滚轮翻
+  function equipVertical() { return true; }
+
+  function equipViewTop() { return 150; }
+  function equipViewH() { return Math.max(160, H - 84 - equipViewTop()); }
+  function equipContentH() {
+    var gap = 18, n = WEAPONS.length;
+    return n * (EQ_H + gap) - gap;
+  }
+  function equipScrollMax() {
+    return equipVertical() ? Math.max(0, equipContentH() - equipViewH()) : 0;
+  }
+
+  function equipGeom() {
+    var gap = 18, n = WEAPONS.length, v = equipVertical();
+    var g = { gap: gap, n: n, vertical: v, top: equipViewTop(), viewH: equipViewH() };
+    g.bottom = g.top + g.viewH;
+    if (v) {
+      g.cw = clamp(W - 96, 220, 400);
+      g.x0 = (W - g.cw) / 2;
+      g.step = EQ_H + gap;
+      g.contentH = equipContentH();
+      g.y0 = g.top - game.equipScroll;
+    } else {
+      g.cw = clamp((W - 96 - gap * (n - 1)) / n, 150, EQ_MAXW);
+      g.x0 = W / 2 - (g.cw * n + gap * (n - 1)) / 2;
+      g.y0 = clamp(H * 0.52 - EQ_H / 2, 178, Math.max(178, H - EQ_H - 80));
+      g.step = g.cw + gap;
+      g.contentH = 0;
+    }
+    return g;
+  }
+
+  function equipRect(g, i) {
+    return g.vertical
+      ? { x: g.x0, y: g.y0 + i * g.step, w: g.cw, h: EQ_H }
+      : { x: g.x0 + i * g.step, y: g.y0, w: g.cw, h: EQ_H };
+  }
+
+  function drawEquipScrollbar(g) {
+    var x = W - 22, h = g.viewH, frac = g.viewH / g.contentH;
+    var barH = Math.max(46, h * frac);
+    var maxS = g.contentH - g.viewH;
+    var y = g.top + (h - barH) * (maxS > 0 ? game.equipScroll / maxS : 0);
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(x, g.top, 3, h);
+    ctx.fillStyle = "rgba(140,235,255,0.55)";
+    ctx.fillRect(x, y, 3, barH);
+  }
+
+  function layoutEquip(list) {
+    var g = equipGeom();
+    list.push({ id: "backHome", kind: "nav", target: "home", x: W - 48 - 104, y: 40, w: 104, h: 42 });
+    for (var i = 0; i < WEAPONS.length; i++) {
+      var r = equipRect(g, i);
+      var y1 = Math.max(r.y, g.top), y2 = Math.min(r.y + r.h, g.bottom);
+      if (y2 - y1 <= 0) continue;   // 滚出视野的卡片不参与命中
+      list.push({ id: "weapon" + i, kind: "weapon", idx: i, x: r.x, y: y1, w: r.w, h: y2 - y1 });
+    }
+  }
+
+  function layoutMode(list) {
+    var gap = 22, n = MODES.length;
+    var mw = clamp((W - 96 - gap * (n - 1)) / n, 226, MD_W);
+    var x0 = W / 2 - (mw * n + gap * (n - 1)) / 2;
+    // 卡片 + 间距 + 按钮作为一个整体居中，而不是只居中卡片
+    var blockH = MD_H + BTN_START_GAP + BTN_START_H;
+    var y0 = H * 0.5 - blockH / 2 - 12;
+    list.push({ id: "backHome", kind: "nav", target: "home", x: W - 48 - 104, y: 40, w: 104, h: 42 });
+    for (var i = 0; i < n; i++) {
+      list.push({ id: "mode" + i, kind: "mode", idx: i, x: x0 + i * (mw + gap), y: y0, w: mw, h: MD_H });
+    }
+    list.push({ id: "start", kind: "start", x: W / 2 - 160, y: y0 + MD_H + BTN_START_GAP, w: 320, h: BTN_START_H });
+  }
+
+  // 暂停时只留一个出口：继续按 Esc，退出点这里
+  function pauseLayout() {
+    game.ui = [{ id: "exitRun", kind: "exitRun", x: W / 2 - 92, y: H / 2 + 30, w: 184, h: 46 }];
+  }
+
+  function uiById(id) {
+    for (var i = 0; i < game.ui.length; i++) if (game.ui[i].id === id) return game.ui[i];
+    return null;
+  }
+
+  function hitUi(x, y) {
+    for (var i = 0; i < game.ui.length; i++) {
+      var u = game.ui[i];
+      if (x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h) return u;
+    }
+    return null;
+  }
+
+  function act(u) {
+    if (!u) return;
+    if (u.kind === "nav") {
+      game.screen = u.target;
+      if (u.target === "equip") game.equipScroll = 0;
+      game.hoverId = null;
+      game.pageT = 0;
+      menuLayout();
+    } else if (u.kind === "weapon") {
+      if (game.weapon !== u.idx) game.reloadT = 0;   // 换枪打断换弹
+      game.weapon = u.idx;
+    } else if (u.kind === "mode") {
+      game.mode = MODES[u.idx].id;
+    } else if (u.kind === "start") {
+      startRun();
+    } else if (u.kind === "exitRun") {
+      backToMenu();
+    }
+  }
+
+  // 眼球朝鼠标：返回 -1..1 的方向分量；鼠标还没进画面时朝右前，别斜在角上
+  // 60px 内按比例收，是为了"鼠标贴着球"时瞳孔不抖；超过 60px 就顶满——
+  // 对局里瞄近处的敌人时，眼珠必须立刻转过去，不能还慢半拍
+  function lookAt(cx, cy, sx, sy) {
+    if (mouse.x < 0 || mouse.y < 0) return { x: 0.34, y: 0.10 };
+    var dx = sx - cx, dy = sy - cy;
+    var d = Math.hypot(dx, dy) || 1;
+    var k = Math.min(1, d / 60);
+    return { x: (dx / d) * k, y: (dy / d) * k };
+  }
+
+  // ---------- 安全屋 ----------
+  function rect(x, y, w, h) { return { x: x, y: y, w: w, h: h }; }
+
+  function buildSafehouse() {
+    var mw = W * SAFE_SCALE, mh = H * SAFE_SCALE;
+    var T = 16, open = 96;
+    var walls = [];
+    var gates = [];
+    var spawns = [];
+
+    // 三个入口：上、左、右，开口居中
+    var midX = mw / 2, midY = mh / 2;
+
+    // 上墙（留口）
+    walls.push(rect(0, 0, midX - open / 2, T));
+    walls.push(rect(midX + open / 2, 0, mw - midX - open / 2, T));
+    // 下墙整条
+    walls.push(rect(0, mh - T, mw, T));
+    // 左墙（留口）
+    walls.push(rect(0, 0, T, midY - open / 2));
+    walls.push(rect(0, midY + open / 2, T, mh - midY - open / 2));
+    // 右墙（留口）
+    walls.push(rect(mw - T, 0, T, midY - open / 2));
+    walls.push(rect(mw - T, midY + open / 2, T, mh - midY - open / 2));
+
+    // 三道屏风：挡在入口正前方，逼所有人绕一端
+    var sw = mw * 0.26, sh = mh * 0.26;
+    walls.push(rect(midX - sw / 2, mh * 0.18, sw, T));      // 入口 1（上）
+    walls.push(rect(mw * 0.16, midY - sh / 2, T, sh));      // 入口 2（左）
+    walls.push(rect(mw * 0.84 - T, midY - sh / 2, T, sh));  // 入口 3（右）
+
+    // 中岛与两块低掩体
+    walls.push(rect(mw * 0.42, mh * 0.42, mw * 0.16, mh * 0.14));
+    walls.push(rect(mw * 0.22, mh * 0.74, mw * 0.12, mh * 0.06));
+    walls.push(rect(mw * 0.66, mh * 0.74, mw * 0.12, mh * 0.06));
+
+    // 出现点：三个开口内侧 40px
+    spawns.push({ x: midX, y: T + 40, ix: 0, iy: 1 });
+    spawns.push({ x: T + 40, y: midY, ix: 1, iy: 0 });
+    spawns.push({ x: mw - T - 40, y: midY, ix: -1, iy: 0 });
+
+    // 未开放的入口用闸门堵住
+    gates.push(rect(midX - open / 2, 0, open, T));
+    gates.push(rect(0, midY - open / 2, T, open));
+    gates.push(rect(mw - T, midY - open / 2, T, open));
+
+    return { walls: walls, gates: gates, spawns: spawns, mw: mw, mh: mh, midX: midX, midY: midY };
+  }
+
+  function layoutArena() {
+    var p = game.player;
+    if (!p) return;
+
+    if (game.mode === "classic") {
+      game.mapW = W;
+      game.mapH = H;
+      game.walls = [];
+      game.gates = [];
+      game.spawns = [];
+      p.x = clamp(p.x, p.r, W - p.r);
+      p.y = clamp(p.y, p.r, H - p.r);
+      return;
+    }
+
+    var a = buildSafehouse();
+    game.mapW = a.mw;
+    game.mapH = a.mh;
+    game.gates = a.gates;
+    game.spawns = a.spawns;
+    refreshWalls(a.walls);
+    p.x = clamp(p.x, p.r, game.mapW - p.r);
+    p.y = clamp(p.y, p.r, game.mapH - p.r);
+    pushOutOfWalls(p);
+  }
+
+  function refreshWalls(base) {
+    var active = levelEq() <= 2 ? 1 : (levelEq() <= 4 ? 2 : 3);
+    var list = base ? base.slice() : [];
+    if (!base) {
+      var a = buildSafehouse();
+      list = a.walls.slice();
+      game.gates = a.gates;
+    }
+    for (var i = 0; i < game.gates.length; i++) {
+      if (i >= active) list.push(game.gates[i]);
+    }
+    game.walls = list;
+    buildNav();
+  }
+
+  // ---------- 寻路：以玩家为源点的距离场 ----------
+  // 局部贴墙逻辑会在墙角打转（对称的墙没有「更近的一端」），所以直接用 BFS 流场：
+  // 每格存到玩家的步数，敌人只要走向步数更小的邻格，天然不会死循环。
+  var NAV = null;
+
+  function buildNav() {
+    var c = 48;
+    var cols = Math.ceil(game.mapW / c), rows = Math.ceil(game.mapH / c);
+    var n = cols * rows;
+    var blocked = new Uint8Array(n);
+    var pad = 16;                      // 敌人半径留边，别贴脸走
+    for (var r = 0; r < rows; r++) {
+      for (var q = 0; q < cols; q++) {
+        var x0 = q * c, y0 = r * c, hit = 0;
+        for (var i = 0; i < game.walls.length; i++) {
+          var w = game.walls[i];
+          if (x0 < w.x + w.w + pad && x0 + c > w.x - pad &&
+              y0 < w.y + w.h + pad && y0 + c > w.y - pad) { hit = 1; break; }
+        }
+        blocked[r * cols + q] = hit;
+      }
+    }
+    NAV = {
+      c: c, cols: cols, rows: rows, blocked: blocked,
+      dist: new Int32Array(n), queue: new Int32Array(n), key: -1
+    };
+  }
+
+  function updateField() {
+    if (!NAV) return;
+    var p = game.player;
+    var cols = NAV.cols, rows = NAV.rows;
+    var pc = clamp(Math.floor(p.x / NAV.c), 0, cols - 1);
+    var pr = clamp(Math.floor(p.y / NAV.c), 0, rows - 1);
+    var start = pr * cols + pc;
+    if (NAV.key === start) return;
+    NAV.key = start;
+
+    var dist = NAV.dist, q = NAV.queue;
+    dist.fill(-1);
+    var qh = 0, qt = 0;
+    dist[start] = 0;
+    q[qt++] = start;
+    while (qh < qt) {
+      var cur = q[qh++];
+      var cr = (cur / cols) | 0, cc = cur - cr * cols;
+      var nd = dist[cur] + 1;
+      for (var k = 0; k < 4; k++) {
+        var nr = cr + (k === 0 ? -1 : k === 1 ? 1 : 0);
+        var nc = cc + (k === 2 ? -1 : k === 3 ? 1 : 0);
+        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue;
+        var ni = nr * cols + nc;
+        if (NAV.blocked[ni] || dist[ni] >= 0) continue;
+        dist[ni] = nd;
+        q[qt++] = ni;
+      }
+    }
+  }
+
+  // 返回下一个该去的格子中心；返回 null 表示「直接冲玩家」
+  function navTarget(e) {
+    if (!NAV || !isHouse()) return null;
+    var c = NAV.c, cols = NAV.cols, rows = NAV.rows;
+    var cc = clamp(Math.floor(e.x / c), 0, cols - 1);
+    var cr = clamp(Math.floor(e.y / c), 0, rows - 1);
+    var best = NAV.dist[cr * cols + cc];
+    if (best < 0) return null;
+    var br = -1, bc = -1;
+    for (var dr = -1; dr <= 1; dr++) {
+      for (var dc = -1; dc <= 1; dc++) {
+        if (!dr && !dc) continue;
+        var nr = cr + dr, nc = cc + dc;
+        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue;
+        var ni = nr * cols + nc;
+        if (NAV.blocked[ni] || NAV.dist[ni] < 0 || NAV.dist[ni] >= best) continue;
+        if (dr && dc && (NAV.blocked[cr * cols + nc] || NAV.blocked[nr * cols + cc])) continue;  // 不切角
+        best = NAV.dist[ni]; br = nr; bc = nc;
+      }
+    }
+    if (br < 0) return null;
+    return { x: (bc + 0.5) * c, y: (br + 0.5) * c };
+  }
+
+  function pushOutOfWalls(o) {
+    for (var i = 0; i < game.walls.length; i++) {
+      var w = game.walls[i];
+      if (!circleHit(o.x, o.y, o.r, w)) continue;
+      var cx = clamp(o.x, w.x, w.x + w.w), cy = clamp(o.y, w.y, w.y + w.h);
+      var dx = o.x - cx, dy = o.y - cy;
+      if (dx === 0 && dy === 0) {
+        // 圆心在墙里：往最近的一条边推出去（否则原地不动，永远卡着）
+        var dl = o.x - w.x, dr = w.x + w.w - o.x, dt = o.y - w.y, db = w.y + w.h - o.y;
+        var m = Math.min(dl, dr, dt, db);
+        if (m === dl) o.x = w.x - o.r - 0.5;
+        else if (m === dr) o.x = w.x + w.w + o.r + 0.5;
+        else if (m === dt) o.y = w.y - o.r - 0.5;
+        else o.y = w.y + w.h + o.r + 0.5;
+        continue;
+      }
+      var d = Math.hypot(dx, dy) || 0.01;
+      o.x = cx + (dx / d) * (o.r + 0.5);
+      o.y = cy + (dy / d) * (o.r + 0.5);
+    }
+  }
+
+  // ---------- 碰撞 ----------
+  function circleHit(x, y, r, w) {
+    var nx = clamp(x, w.x, w.x + w.w);
+    var ny = clamp(y, w.y, w.y + w.h);
+    var dx = x - nx, dy = y - ny;
+    return dx * dx + dy * dy < r * r;
+  }
+
+  function wallAt(x, y, r) {
+    for (var i = 0; i < game.walls.length; i++) {
+      if (circleHit(x, y, r, game.walls[i])) return game.walls[i];
+    }
+    return null;
+  }
+
+  // unbounded = 允许留在图外（经典模式的敌人要从屏幕外走进来）
+  function moveCircle(o, dx, dy, unbounded) {
+    o.blockX = false;
+    o.blockY = false;
+    o.wallX = null;
+    o.wallY = null;
+    var n = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 8));
+    for (var i = 0; i < n; i++) {
+      var sx = dx / n;
+      o.x += sx;
+      var w = wallAt(o.x, o.y, o.r);
+      if (w) {
+        o.x = sx > 0 ? w.x - o.r - 0.01 : w.x + w.w + o.r + 0.01;
+        o.blockX = true;
+        o.wallX = w;
+      }
+      var sy = dy / n;
+      o.y += sy;
+      var w2 = wallAt(o.x, o.y, o.r);
+      if (w2) {
+        o.y = sy > 0 ? w2.y - o.r - 0.01 : w2.y + w2.h + o.r + 0.01;
+        o.blockY = true;
+        o.wallY = w2;
+      }
+    }
+    if (!unbounded) {
+      o.x = clamp(o.x, o.r, game.mapW - o.r);
+      o.y = clamp(o.y, o.r, game.mapH - o.r);
+    }
+  }
+
+  // ---------- 开局 ----------
+  function startRun() {
+    var modesPrev = game.fireMode || [];
+    game.fireMode = [];
+    for (var fm = 0; fm < WEAPONS.length; fm++) game.fireMode.push(modesPrev[fm] || 0);
+    game.ammo = [];
+    for (var wi = 0; wi < WEAPONS.length; wi++) game.ammo.push(WEAPONS[wi].mag);
+    game.reloadT = 0;
+    game.state = "playing";
+    game.hoverId = null;
+    game.player = makePlayer();
+    game.bullets = [];
+    game.foes = [];
+    game.enemies = [];
+    game.particles = [];
+    game.pickups = [];
+    game.score = 0;
+    game.wave = 0;
+    game.level = 1;
+    game.spawnQueue = [];
+    game.spawnTimer = 0;
+    game.banner = "";
+    game.bannerTime = 0;
+    game.shake = 0;
+    game.hitFlash = 0;
+    game.kills = 0;
+    game.timeAlive = 0;
+
+    var p = game.player;
+    if (game.mode === "classic") {
+      game.mapW = W;
+      game.mapH = H;
+      game.walls = [];
+      game.gates = [];
+      game.spawns = [];
+      p.x = W / 2;
+      p.y = H / 2;
+      game.cam.x = 0;
+      game.cam.y = 0;
+      startClassicWave();
+    } else {
+      var a = buildSafehouse();
+      game.mapW = a.mw;
+      game.mapH = a.mh;
+      game.gates = a.gates;
+      game.spawns = a.spawns;
+      game.level = 1;
+      refreshWalls(a.walls);
+      p.x = a.midX;
+      p.y = a.mh * 0.68;
+      game.cam.x = clamp(p.x - W / 2, 0, game.mapW - W);
+      game.cam.y = clamp(p.y - H / 2, 0, game.mapH - H);
+      startSoloLevel();
+    }
+  }
+
+  function togglePause() {
+    if (game.state === "playing") {
+      game.state = "paused";
+      game.hoverId = null;
+      game.pressId = null;
+      pauseLayout();
+    } else if (game.state === "paused") {
+      game.state = "playing";
+      game.hoverId = null;
+      game.pressId = null;
+    }
+  }
+
+  function backToMenu() {
+    game.state = "menu";
+    game.screen = "home";
+    game.hoverId = null;
+    game.pressId = null;
+    game.pageT = 0;
+    mouse.down = false;
+    menuLayout();
+  }
+
+  // ---------- 波次 / 关卡 ----------
+  function pickType() {
+    var roll = Math.random();
+    var lv = game.mode === "classic" ? game.wave : levelEq();
+    // 第 7 关起单独一套权重：炮手 16% / 重装 8% / 快速 18% / 追击 58%
+    if (isHouse() && lv >= 7) {
+      if (roll > 0.84) return "gunner";
+      if (roll > 0.76) return "tank";
+      if (roll > 0.58) return "fast";
+      return "chaser";
+    }
+    if (lv >= 4 && roll > 0.9) return "tank";
+    if (lv >= 3 && roll > 0.72) return "fast";
+    return "chaser";
+  }
+
+  function startClassicWave() {
+    game.wave++;
+    var n = 4 + Math.floor(game.wave * 2.2);
+    var q = [];
+    for (var i = 0; i < n; i++) q.push(pickType());
+    game.spawnQueue = game.spawnQueue.concat(q);
+    game.spawnTimer = game.wave === 1 ? 0.9 : 2.0;
+    game.banner = "第 " + game.wave + " 波";
+    game.bannerTime = 1.6;
+  }
+
+  function startSoloLevel() {
+    refreshWalls(null);
+    var n = 6 + levelEq() * 2;
+    var q = [];
+    for (var i = 0; i < n; i++) q.push(pickType());
+    game.spawnQueue = q;
+    game.spawnTimer = game.mode === "blitz" ? 0.2 : 1.0;
+
+    // 小队从上方那个专用门进场，一次把这一关的队都放出来（各自错开一点）
+    var sq = squadsForLevel(levelEq());
+    for (var s2 = 0; s2 < sq; s2++) spawnSquad(game.spawns[SQUAD_GATE], s2);
+    game.banner = "第 " + pad2(game.level) + " 关";
+    game.bannerTime = 1.6;
+  }
+
+  function spawnEnemy(typeName, point, opt) {
+    if (typeName === "gunner" && countType("gunner") >= 3) typeName = "chaser";
+    opt = opt || {};
+    var t = TYPES[typeName];
+    var e = {
+      type: typeName,
+      r: t.r,
+      hp: t.hp,
+      maxHp: t.hp,
+      speed: t.speed,
+      dmg: t.dmg,
+      score: t.score,
+      color: t.color,
+      glow: t.glow,
+      hitCd: 0,
+      hurt: 0,
+      vx: 0, vy: 0,
+      wobble: rand(0, Math.PI * 2),
+      emerge: 0,
+      uid: ++game.uidSeq,
+      squad: opt.squad || 0,             // 士兵：所属小队
+      gun: opt.gun || "al10",            // 士兵：手里那把枪
+      aim: 0, raiseT: 0, cd: 0, gap: 0, ammo: 7, burstIn: 3, muzzle: 0,
+      aware: false,
+      charge: -1,                        // >=0 表示正在蓄能，值是已蓄秒数
+      aim: 0,
+      fireCd: 0.9 + rand(0, 0.9),
+      strafe: Math.random() < 0.5 ? 1 : -1,
+      strafeCd: 0,
+      blockX: false, blockY: false,
+      wallX: null, wallY: null
+    };
+
+    if (game.mode === "classic") {
+      var edge = Math.floor(Math.random() * 4);
+      var pad = 60;
+      if (edge === 0) { e.x = rand(0, game.mapW); e.y = -pad; }
+      else if (edge === 1) { e.x = game.mapW + pad; e.y = rand(0, game.mapH); }
+      else if (edge === 2) { e.x = rand(0, game.mapW); e.y = game.mapH + pad; }
+      else { e.x = -pad; e.y = rand(0, game.mapH); }
+    } else {
+      e.emerge = 0.45;
+      if (opt.exact) {
+        e.x = point.x;
+        e.y = point.y;
+      } else {
+        e.x = point.x + rand(-26, 26);
+        e.y = point.y + rand(-26, 26);
+      }
+      // 出生点一定夹回地图内：以前撒到门外会出现在墙外面
+      e.x = clamp(e.x, e.r + 6, game.mapW - e.r - 6);
+      e.y = clamp(e.y, e.r + 6, game.mapH - e.r - 6);
+      pushOutOfWalls(e);
+    }
+    game.enemies.push(e);
+  }
+
+  // ---------- 特效 ----------
+  function burst(x, y, color, count, power) {
+    for (var i = 0; i < count; i++) {
+      var a = rand(0, Math.PI * 2);
+      var sp = rand(0.2, 1) * power;
+      var life = rand(0.25, 0.7);
+      game.particles.push({
+        x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: life, maxLife: life, size: rand(1.5, 3.6), color: color
+      });
+    }
+  }
+
+  function trail(x, y, color) {
+    game.particles.push({
+      x: x, y: y, vx: rand(-20, 20), vy: rand(-20, 20),
+      life: 0.22, maxLife: 0.22, size: rand(1, 2.2), color: color
+    });
+  }
+
+  // ---------- 射击 ----------
+  function fireModeOf(w) {
+    return w.modes[game.fireMode[game.weapon] || 0] || w.modes[0];
+  }
+
+  // M 键：在可用模式里循环。换模式时清掉没打完的一组，免得下一组接着吐
+  function startReload() {
+    var w = WEAPONS[game.weapon];
+    if (game.reloadT > 0 || game.ammo[game.weapon] >= w.mag) return;
+    game.reloadT = w.reload;
+    game.reloadTime = w.reload;
+    if (game.player) game.player.burstLeft = 0;   // 换弹时把没打完的一组清掉
+  }
+
+  function cycleFireMode() {
+    var w = WEAPONS[game.weapon];
+    if (w.modes.length < 2) return;
+    game.fireMode[game.weapon] = (game.fireMode[game.weapon] + 1) % w.modes.length;
+    var p = game.player;
+    if (p) {
+      p.modeFlash = 0.7;
+      p.burstLeft = 0;
+      p.fireCd = Math.max(p.fireCd, 0.12);
+    }
+  }
+
+  function shoot(p) {
+    var w = WEAPONS[game.weapon];
+    if (game.ammo[game.weapon] <= 0) return;
+    game.ammo[game.weapon]--;
+    var m = fireModeOf(w);
+    var sp = m.spread;
+    var kick = m.kick !== undefined ? m.kick : w.kick;
+    var ang = p.aim + rand(-sp, sp);
+    var mx = p.x + Math.cos(p.aim) * (p.r + 6);
+    var my = p.y + Math.sin(p.aim) * (p.r + 6);
+    game.bullets.push({
+      x: mx, y: my,
+      vx: Math.cos(ang) * w.speed,
+      vy: Math.sin(ang) * w.speed,
+      r: w.r, life: w.range / w.speed, dmg: w.dmg
+    });
+    p.muzzle = 0.07;
+    p.recoil = kick * 2.2;
+    p.combat = 0.14;
+    game.shake = Math.min(game.shake + kick, 9);
+    burst(mx, my, "#fff6cf", 3, 90);
+  }
+
+  // 命中敌人：白闪 + 击退 + 火花 + 微震
+  function hurtEnemy(idx, b, noReward) {
+    var e = game.enemies[idx];
+    if (!e) return;
+    e.hp -= b.dmg;
+    e.hurt = 0.12;
+    e.vx += b.vx * 0.012;
+    e.vy += b.vy * 0.012;
+    burst(b.x, b.y, e.glow, 5, 150);
+    game.shake = Math.min(game.shake + 1.6, 9);
+    if (e.hp > 0) return;
+
+    burst(e.x, e.y, e.color, 22, 300);
+    burst(e.x, e.y, "#ffffff", 6, 180);
+    if (!noReward) {
+      game.score += e.score;
+      game.kills++;
+      game.shake = Math.min(game.shake + 4, 14);
+    }
+    if (!noReward && Math.random() < 0.13) {
+      game.pickups.push({ x: e.x, y: e.y, r: 11, life: 13, phase: rand(0, 6.28) });
+    }
+    game.enemies.splice(idx, 1);
+    // 清场之后才开始计时：波间 2.0s / 关间 1.2s
+    if (game.enemies.length === 0 && game.spawnQueue.length === 0) {
+      game.spawnTimer = game.mode === "classic" ? 2.0 : (game.mode === "blitz" ? 1.2 / BLITZ_RATE : 1.2);
+    }
+  }
+
+  // ---------- 更新 ----------
+  function update(dt) {
+    var p = game.player;
+    game.timeAlive += dt;
+    game.shake = Math.max(0, game.shake - dt * 26);
+    game.hitFlash = Math.max(0, game.hitFlash - dt);
+    game.bannerTime = Math.max(0, game.bannerTime - dt);
+
+    // 瞄准：鼠标是屏幕坐标，换成世界坐标
+    var wmx = mouse.x + game.cam.x, wmy = mouse.y + game.cam.y;
+    p.aim = Math.atan2(wmy - p.y, wmx - p.x);
+
+    var mx = (keys["KeyD"] || keys["ArrowRight"] ? 1 : 0) - (keys["KeyA"] || keys["ArrowLeft"] ? 1 : 0);
+    var my = (keys["KeyS"] || keys["ArrowDown"] ? 1 : 0) - (keys["KeyW"] || keys["ArrowUp"] ? 1 : 0);
+    var len = Math.hypot(mx, my);
+    if (len > 0) { mx /= len; my /= len; }
+
+    p.dashCd = Math.max(0, p.dashCd - dt);
+    if ((keys["ShiftLeft"] || keys["ShiftRight"]) && p.dashCd <= 0 && p.dashTime <= 0 && len > 0) {
+      p.dashTime = 0.15;
+      p.dashCd = 1.25;
+      p.dashDirX = mx; p.dashDirY = my;
+      burst(p.x, p.y, C.player, 12, 160);
+    }
+
+    var vx, vy;
+    if (p.dashTime > 0) {
+      p.dashTime -= dt;
+      vx = p.dashDirX * 900;
+      vy = p.dashDirY * 900;
+      trail(p.x, p.y, C.player);
+    } else {
+      vx = mx * p.speed;
+      vy = my * p.speed;
+    }
+    moveCircle(p, vx * dt, vy * dt);
+
+    p.invuln = Math.max(0, p.invuln - dt);
+    p.muzzle = Math.max(0, p.muzzle - dt);
+    p.recoil = Math.max(0, p.recoil - dt * 22);
+    p.combat = Math.max(0, p.combat - dt);
+
+    // 开火：连发按住就射；单发 / 三连发必须松开再按（M 换模式）
+    p.fireCd -= dt;
+    p.modeFlash = Math.max(0, p.modeFlash - dt);
+    if (!mouse.down) p.trigger = true;
+
+    var wNow = WEAPONS[game.weapon];
+    var mNow = fireModeOf(wNow);
+    var cdNow = mNow.cd !== undefined ? mNow.cd : wNow.cd;
+
+    // 换弹：0.8s，期间不能开火，也不会被开火打断
+    if (game.reloadT > 0) {
+      game.reloadT -= dt;
+      if (game.reloadT <= 0) { game.reloadT = 0; game.ammo[game.weapon] = wNow.mag; }
+    }
+    var canPull = game.reloadT <= 0 && game.ammo[game.weapon] > 0;
+
+    // 一组连发按节奏吐完。冷却从**最后一发**开始算——
+    // 若从第一发就开始算，0.15s 的冷却在组内就跑完了，下一组会直接接上，
+    // 三连发就变成了每秒十发的机枪
+    if (p.burstLeft > 0) {
+      p.burstT -= dt;
+      while (p.burstLeft > 0 && p.burstT <= 0) {
+        shoot(p);
+        p.burstLeft--;
+        if (p.burstLeft > 0) p.burstT += mNow.gap;
+        else p.fireCd = cdNow;
+      }
+    }
+
+    // 打空了还在扣扳机：自动开始换弹（否则按左键没反应，像卡住了）
+    if (mouse.down && p.fireCd <= 0 && game.ammo[game.weapon] <= 0 && game.reloadT <= 0 &&
+        game.state === "playing" && p.burstLeft <= 0) {
+      startReload();
+    }
+
+    if (mouse.down && p.fireCd <= 0 && canPull && game.state === "playing") {
+      if (mNow.burst > 1) {
+        if (p.trigger || wNow.holdBurst) {
+          // 上一组还没吐完就按下的，这一下直接丢掉：
+          // 否则新组会顶掉旧组的余量，5 发子弹混在一起喷出去
+          p.trigger = false;
+          if (p.burstLeft <= 0) {
+            p.burstLeft = mNow.burst;
+            p.burstT = 0;
+          }
+        }
+      } else if (mNow.id === "auto") {
+        shoot(p);
+        p.fireCd = cdNow;
+      } else if (p.trigger) {
+        p.trigger = false;
+        shoot(p);
+        p.fireCd = cdNow;
+      }
+    }
+
+    // 相机：冲刺时故意追不上，冲完再把人送回中心
+    var tx = clamp(p.x - W / 2, 0, Math.max(0, game.mapW - W));
+    var ty = clamp(p.y - H / 2, 0, Math.max(0, game.mapH - H));
+    var remain = p.dashTime > 0 ? 0.12 : 0.0000001;
+    var k = Math.pow(remain, dt);
+    game.cam.x += (tx - game.cam.x) * (1 - k);
+    game.cam.y += (ty - game.cam.y) * (1 - k);
+    game.cam.x = clamp(game.cam.x, 0, Math.max(0, game.mapW - W));
+    game.cam.y = clamp(game.cam.y, 0, Math.max(0, game.mapH - H));
+
+    // 子弹：分 3 个子步推进，每个子步都查墙和敌人（贴脸和高速都不会漏判）
+    for (var i = game.bullets.length - 1; i >= 0; i--) {
+      var b = game.bullets[i];
+      var steps = 3;
+      var done = false;
+      for (var s = 0; s < steps && !done; s++) {
+        b.x += b.vx * dt / steps;
+        b.y += b.vy * dt / steps;
+        if (game.walls.length && wallAt(b.x, b.y, b.r)) {
+          burst(b.x, b.y, "rgba(190,235,255,0.9)", 3, 110);
+          done = true;
+          break;
+        }
+        for (var m = game.enemies.length - 1; m >= 0; m--) {
+          var e2 = game.enemies[m];
+          var hrr = e2.r + b.r;
+          if (dist2(b.x, b.y, e2.x, e2.y) < hrr * hrr) {
+            hurtEnemy(m, b);
+            done = true;
+            break;
+          }
+        }
+      }
+      b.life -= dt;
+      if (done) { game.bullets.splice(i, 1); continue; }
+      if (b.life <= 0 || b.x < -40 || b.x > game.mapW + 40 || b.y < -40 || b.y > game.mapH + 40) {
+        game.bullets.splice(i, 1);
+      }
+    }
+
+    // 敌弹：分 3 个子步，撞墙碎裂、贴身命中玩家
+    for (var fi = game.foes.length - 1; fi >= 0; fi--) {
+      var fo = game.foes[fi];
+      var foeDone = false;
+      for (var fs = 0; fs < 3 && !foeDone; fs++) {
+        fo.x += fo.vx * dt / 3;
+        fo.y += fo.vy * dt / 3;
+        if (game.walls.length && wallAt(fo.x, fo.y, fo.r)) {
+          burst(fo.x, fo.y, "rgba(255,186,130,0.9)", 4, 130);
+          foeDone = true;
+          break;
+        }
+        if (fo.side === "soldier") {
+          for (var m4 = 0; m4 < game.enemies.length; m4++) {
+            var s4 = game.enemies[m4];
+            if (s4.type === "soldier") continue;
+            var hr2 = s4.r + fo.r;
+            if (dist2(fo.x, fo.y, s4.x, s4.y) < hr2 * hr2) {
+              hurtEnemy(m4, fo, true);
+              foeDone = true;
+              break;
+            }
+          }
+          if (foeDone) break;
+        }
+
+        var fr = fo.r + p.r;
+        if (p.invuln <= 0 && p.dashTime <= 0 &&
+            dist2(fo.x, fo.y, p.x, p.y) < fr * fr) {
+          p.hp -= fo.dmg;
+          p.invuln = 0.45;
+          game.shake = Math.min(game.shake + 7, 16);
+          game.hitFlash = 0.5;
+          burst(p.x, p.y, "#ff8a3d", 12, 200);
+          moveCircle(p, fo.vx * 0.012, fo.vy * 0.012);
+          foeDone = true;
+          if (p.hp <= 0) { die(); return; }
+        }
+      }
+      fo.life -= dt;
+      if (foeDone) { game.foes.splice(fi, 1); continue; }
+      if (fo.life <= 0 || fo.x < -60 || fo.x > game.mapW + 60 ||
+          fo.y < -60 || fo.y > game.mapH + 60) {
+        game.foes.splice(fi, 1);
+      }
+    }
+
+    // 敌人
+    var px = p.x, py = p.y;
+    if (isHouse()) updateField();
+
+    // 小队先更新状态：谁在推进、要不要后撤
+    for (var sid in game.squads) squadTick(game.squads[sid], dt);
+
+    for (var j = game.enemies.length - 1; j >= 0; j--) {
+      var e = game.enemies[j];
+      if (!e) continue;
+      e.hurt = Math.max(0, e.hurt - dt);
+      e.hitCd = Math.max(0, e.hitCd - dt);
+      e.wobble += dt * 6;
+      if (e.emerge > 0) e.emerge = Math.max(0, e.emerge - dt);
+
+      // 谁在视野里：玩家优先，其次是士兵。看不见就只是"搜索前进"
+      var tgt = pickTarget(e, p);
+      e.aware = !!tgt;
+
+      if (e.type === "soldier") {
+        soldierThink(e, dt, p, tgt);
+      } else {
+        var nt = navTarget(e);
+        var gx2 = nt ? nt.x : px, gy2 = nt ? nt.y : py;
+        if (tgt && tgt.kind === "soldier") { gx2 = tgt.x; gy2 = tgt.y; }
+        var dx = gx2 - e.x, dy = gy2 - e.y;
+        var d = Math.hypot(dx, dy) || 1;
+        var nx = dx / d, ny = dy / d;
+
+        var sepX = 0, sepY = 0;
+        for (var k2 = 0; k2 < game.enemies.length; k2++) {
+          if (k2 === j) continue;
+          var o = game.enemies[k2];
+          var ddx = e.x - o.x, ddy = e.y - o.y;
+          var dd = Math.hypot(ddx, ddy);
+          if (dd > 0 && dd < e.r + o.r) {
+            sepX += (ddx / dd) * (e.r + o.r - dd) * 2.2;
+            sepY += (ddy / dd) * (e.r + o.r - dd) * 2.2;
+          }
+        }
+
+        var mvx, mvy;
+        if (e.type === "gunner") {
+          // 距离带按到玩家的直线距离算：d 是到寻路路点的距离，不能拿来判距
+          var pd = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+          gunnerThink(e, p, dt, pd, nx, ny);
+          var slow = e.charge >= 0 ? 0.25 : 1;
+          var ax2 = 0, ay2 = 0;
+          if (pd > GUNNER.far) { ax2 = nx; ay2 = ny; }
+          else if (pd < GUNNER.near) { ax2 = -nx; ay2 = -ny; }
+          else { ax2 = -ny * e.strafe; ay2 = nx * e.strafe; }
+          mvx = ax2 * e.speed * slow + sepX + e.vx;
+          mvy = ay2 * e.speed * slow + sepY + e.vy;
+        } else {
+          var wob = Math.sin(e.wobble) * 0.28;
+          var spd = e.aware ? e.speed : e.speed * 0.7;   // 没发现：70% 速度搜索前进
+          mvx = nx * spd + sepX + (-ny) * wob * spd * 0.5 + e.vx;
+          mvy = ny * spd + sepY + (nx) * wob * spd * 0.5 + e.vy;
+        }
+
+        if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
+        moveCircle(e, mvx * dt, mvy * dt, !isHouse());
+
+        // 横移撞墙就换个方向绕，不然它会贴着墙左右抖
+        e.strafeCd = Math.max(0, e.strafeCd - dt);
+        if (e.type === "gunner" && e.charge < 0 && e.strafeCd <= 0 && (e.blockX || e.blockY)) {
+          e.strafe = -e.strafe;
+          e.strafeCd = 0.4;
+        }
+
+        e.vx *= Math.pow(0.0025, dt);
+        e.vy *= Math.pow(0.0025, dt);
+      }
+
+      // 接触伤害：对玩家（还没发现你的时候不咬人）
+      var rr = e.r + p.r;
+      var pdd = dist2(e.x, e.y, px, py);
+      if (e.emerge <= 0 && e.aware && pdd < rr * rr) {
+        var pdx = Math.sqrt(pdd) || 1;
+        var kx = (e.x - px) / pdx, ky = (e.y - py) / pdx;
+        moveCircle(e, kx * (rr - pdx), ky * (rr - pdx), !isHouse());
+        if (e.hitCd <= 0 && p.invuln <= 0 && p.dashTime <= 0) {
+          p.hp -= e.dmg;
+          p.invuln = 0.55;
+          e.hitCd = 0.7;
+          game.shake = Math.min(game.shake + 8, 16);
+          game.hitFlash = 0.6;
+          e.vx = kx * 320;
+          e.vy = ky * 320;
+          moveCircle(p, kx * 14, ky * 14);
+          burst(px, py, "#ff5b5b", 14, 220);
+          if (p.hp <= 0) { die(); return; }
+        }
+      }
+
+      // 接触伤害：对士兵（围城敌人打士兵，护甲 0.6）
+      if (e.type !== "soldier" && e.emerge <= 0 && e.hitCd <= 0) {
+        for (var m2 = 0; m2 < game.enemies.length; m2++) {
+          var s3 = game.enemies[m2];
+          if (s3.type !== "soldier") continue;
+          var r2 = e.r + s3.r;
+          if (dist2(e.x, e.y, s3.x, s3.y) < r2 * r2) {
+            s3.hp -= e.dmg * SOLDIER.armor;
+            s3.hurt = 0.12;
+            e.hitCd = 0.7;
+            burst(s3.x, s3.y, s3.color, 5, 130);
+            if (s3.hp <= 0) {
+              burst(s3.x, s3.y, s3.color, 18, 260);
+              game.enemies.splice(m2, 1);
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    // 补给
+    for (var q = game.pickups.length - 1; q >= 0; q--) {
+      var pk = game.pickups[q];
+      pk.life -= dt;
+      pk.phase += dt * 4;
+      if (pk.life <= 0) { game.pickups.splice(q, 1); continue; }
+      var pr = pk.r + p.r;
+      if (dist2(pk.x, pk.y, p.x, p.y) < pr * pr) {
+        p.hp = Math.min(p.maxHp, p.hp + 28);
+        burst(pk.x, pk.y, C.gain, 16, 200);
+        game.pickups.splice(q, 1);
+      }
+    }
+
+    // 粒子
+    for (var n2 = game.particles.length - 1; n2 >= 0; n2--) {
+      var pt = game.particles[n2];
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      pt.vx *= Math.pow(0.02, dt);
+      pt.vy *= Math.pow(0.02, dt);
+      pt.life -= dt;
+      if (pt.life <= 0) game.particles.splice(n2, 1);
+    }
+
+    schedule(dt);
+  }
+
+  function schedule(dt) {
+    game.spawnTimer -= dt;
+
+    if (game.spawnQueue.length > 0) {
+      if (game.spawnTimer <= 0 && game.enemies.length < 46) {
+        var cnt = Math.min(game.spawnQueue.length, 1 + Math.floor(Math.random() * 3));
+        for (var s = 0; s < cnt; s++) {
+          if (game.mode === "classic") {
+            spawnEnemy(game.spawnQueue.shift());
+          } else {
+            var nAct = levelEq() <= 2 ? 1 : (levelEq() <= 4 ? 2 : 3);
+            var active = [];
+            for (var ai = 0; ai < nAct; ai++) {
+              if (levelEq() >= 10 && ai === SQUAD_GATE) continue;   // 这道门只走小队
+              active.push(game.spawns[ai]);
+            }
+            if (!active.length) active = [game.spawns[0]];
+            spawnEnemy(game.spawnQueue.shift(), active[Math.floor(Math.random() * active.length)]);
+          }
+        }
+        game.spawnTimer = !isHouse() ? rand(0.28, 0.6) : (game.mode === "blitz" ? 1.6 / BLITZ_RATE : 1.6);
+      }
+      return;
+    }
+
+    if (game.enemies.length > 0) return;
+
+    if (game.spawnTimer > 0) return;
+    if (game.mode === "classic") {
+      startClassicWave();
+    } else {
+      game.level++;
+      startSoloLevel();
+    }
+  }
+
+  function die() {
+    game.state = "over";
+    burst(game.player.x, game.player.y, "#ff5b5b", 60, 420);
+    burst(game.player.x, game.player.y, "#ffffff", 20, 260);
+    game.shake = 22;
+  }
+
+  // ---------- 绘制 ----------
+  function drawBackground(t) {
+    var g = ctx.createRadialGradient(W / 2, H / 2, 60, W / 2, H / 2, Math.max(W, H) * 0.78);
+    g.addColorStop(0, C.bg0);
+    g.addColorStop(0.55, C.bg1);
+    g.addColorStop(1, C.bg2);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    var step = 64;
+    // 网格固定不动：不跟时间漂、也不跟镜头走。让地面自己在那儿，别替玩家造速度感
+    var ox = (W / 2) % step;
+    var oy = (H / 2) % step;
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var x = ox; x < W + step; x += step) {
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, H);
+    }
+    for (var y = oy; y < H + step; y += step) {
+      ctx.moveTo(0, Math.round(y) + 0.5);
+      ctx.lineTo(W, Math.round(y) + 0.5);
+    }
+    ctx.stroke();
+  }
+
+  function drawWalls() {
+    for (var i = 0; i < game.walls.length; i++) {
+      var w = game.walls[i];
+      ctx.fillStyle = C.wall;
+      ctx.fillRect(w.x, w.y, w.w, w.h);
+      // 下缘一道暗边，读起来像有厚度的板；上缘一道亮边，跟实体光源一致
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.fillRect(w.x, w.y + w.h - 4, w.w, 4);
+      ctx.fillStyle = C.wallEdge;
+      if (w.w >= w.h) ctx.fillRect(w.x, w.y, w.w, 2);
+      else ctx.fillRect(w.x, w.y, 2, w.h);
+    }
+  }
+
+  function drawThresholds() {
+    if (!isHouse()) return;
+    var active = game.level <= 2 ? 1 : (game.level <= 4 ? 2 : 3);
+    var squadLevel = levelEq() >= 10 && squadsForLevel(levelEq()) > 0;
+    for (var i = 0; i < active; i++) {
+      // 敌军专用那道门：这一关没有小队就不开
+      if (i === SQUAD_GATE && levelEq() >= 10 && !squadLevel) continue;
+      var s = game.spawns[i];
+      var a = 0.12 + Math.sin(game.timeAlive * 2.4 + i) * 0.08;
+      ctx.fillStyle = (i === SQUAD_GATE && levelEq() >= 10)
+        ? "rgba(255,77,141," + (a + 0.10) + ")"
+        : "rgba(255,91,91," + a + ")";
+      if (s.ix === 0) ctx.fillRect(s.x - 48, s.iy > 0 ? 16 : game.mapH - 28, 96, 12);
+      else ctx.fillRect(s.ix > 0 ? 16 : game.mapW - 28, s.y - 48, 12, 96);
+    }
+  }
+
+  // 一把激光枪只有三件东西：机匣、枪管、握把 —— 而且全在**一条轮廓**里。
+  // 机匣是块方肩，枪管细一半、从肩下伸出去，枪口斜切一刀收口；
+  // 三个台阶就是一把枪的全部身份。加圆角会变玩具，加零件会变疙瘩。
+  // 所有尺寸都乘 k = r×sc，换个尺寸胖瘦不变。
+  // 三把枪是同一个家族的三种口径：长度、机匣厚度，加一块附属件
+  // AL-11 手枪（最短，光板） / AL-15 冲锋枪（中段挂弹匣） / AL-18 步枪（最长，背上一条瞄轨）
+  var GUNART = {
+    ae15: { len: 1.34, H: 0.34, gh: 0.34, rail: false, fore: false, coil: true },
+    ae25: { len: 1.56, H: 0.36, gh: 0.34, rail: false, fore: false, coil: true },
+    al10: { len: 0.80, H: 0.30, gh: 0.32, rail: false, fore: false },
+    al08: { len: 1.66, H: 0.26, gh: 0.36, rail: true,  fore: false },
+    al11: { len: 1.06, H: 0.30, gh: 0.33, rail: false, fore: false },
+    al15: { len: 1.26, H: 0.28, gh: 0.34, rail: false, fore: true },
+    al18: { len: 1.66, H: 0.26, gh: 0.36, rail: true, fore: false }
+  };
+
+  function gunGeom(r, id, sc, x0) {
+    var a = GUNART[id] || GUNART.al18;
+    var k = r * sc;
+    var len = a.len * k;
+    return {
+      k: k, art: a, x0: x0, len: len,
+      H: a.H * k,                        // 机匣高度
+      gw: k * 0.15,                      // 握把宽
+      gh: a.gh * k,                      // 握把长（约等于机匣高，再长就像站在一根棍上）
+      gx: x0 + len * 0.17
+    };
+  }
+
+  // 机身：方肩机匣 → 台阶 → 细枪管 → 收口的枪口。一条闭合路径，一个圆角都不给。
+  // 两个几何函数都不调 beginPath：往同一条路径里追加，共用一次描边，
+  // 接缝处才不会多出一条多余的线。
+  function gunBody(g) {
+    var x0 = g.x0, L = g.len, H = g.H, b = H * 0.28;
+    ctx.moveTo(x0, -H * 0.5);                    // 机匣后上
+    ctx.lineTo(x0 + L * 0.34, -H * 0.5);         // 机匣背
+    ctx.lineTo(x0 + L * 0.34, -b);               // 台阶下到枪管
+    ctx.lineTo(x0 + L * 0.955, -b);              // 枪管顶
+    ctx.lineTo(x0 + L, -b * 0.55);               // 收口：上斜一刀
+    ctx.lineTo(x0 + L, b * 0.55);                // 出光口
+    ctx.lineTo(x0 + L * 0.955, b);               // 下斜一刀
+    ctx.lineTo(x0 + L * 0.34, b);
+    ctx.lineTo(x0 + L * 0.34, H * 0.5);          // 台阶回到机匣底
+    ctx.lineTo(x0 + L * 0.05, H * 0.5);
+    ctx.lineTo(x0, H * 0.26);                    // 后下切角，给握把让位
+    ctx.closePath();
+  }
+
+  // 前握把：冲锋枪才有，从枪管底下垂下来的一小段——"双握把"就是它和手枪的全部差别
+  function gunFore(g) {
+    var w = g.k * 0.12, h = g.k * 0.24;
+    ctx.save();
+    ctx.translate(g.x0 + g.len * 0.55, g.H * 0.24);
+    ctx.rotate(0.10);
+    ctx.rect(-w / 2, 0, w, h);
+    ctx.restore();
+  }
+
+  // 握把：上宽下窄的一块，向后下方斜插。等宽的话就是一条桌腿
+  function gunGrip(g) {
+    var w = g.gw, h = g.gh;
+    ctx.save();
+    ctx.translate(g.gx, g.H * 0.40);
+    ctx.rotate(0.22);
+    ctx.moveTo(-w * 0.5, 0);
+    ctx.lineTo(w * 0.5, 0);
+    ctx.lineTo(w * 0.30, h);
+    ctx.lineTo(-w * 0.30, h);
+    ctx.closePath();
+    ctx.restore();
+  }
+
+  // 枪在局部坐标里占的横向范围，给"居中预览"用
+  function gunSpan(r, id, sc) {
+    var g = gunGeom(r, id, sc, r - 3);
+    return { min: g.x0, max: g.x0 + g.len };
+  }
+
+  function drawGun(r, id, recoil, muzzle, sc, x0) {
+    sc = sc || 1;
+    if (x0 === undefined) x0 = r - 3 - recoil;
+    var g = gunGeom(r, id, sc, x0);
+    var L = g.len, H = g.H;
+    var lw = Math.max(0.9, H * 0.07);
+
+    // 机身与握把一次描边、一次填色：一整条外轮廓，两块之间不会有缝
+    ctx.beginPath();
+    gunBody(g);
+    gunGrip(g);
+    if (g.art.fore) gunFore(g);
+    ctx.lineJoin = "miter";
+    ctx.strokeStyle = "rgba(6,14,24,0.92)";
+    ctx.lineWidth = lw * 2;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(216,240,255,1)";
+    ctx.fill();
+
+    // 握把压暗一档，不然整把枪是一块白
+    ctx.beginPath();
+    gunGrip(g);
+    if (g.art.fore) gunFore(g);
+    ctx.fillStyle = "rgba(112,152,192,1)";
+    ctx.fill();
+
+    // 瞄轨：只有步枪有，一根贴在顶上的细梁
+    if (g.art.rail) {
+      ctx.beginPath();
+      ctx.rect(g.x0 + L * 0.08, -H * 0.5 - H * 0.20, L * 0.20, H * 0.20);
+      ctx.lineJoin = "miter";
+      ctx.strokeStyle = "rgba(6,14,24,0.92)";
+      ctx.lineWidth = lw * 1.6;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(146,186,220,1)";
+      ctx.fill();
+    }
+
+    // 线圈：电磁枪特有，枪管上两道横箍——七把枪里只有这两把有
+    if (g.art.coil) {
+      for (var ci = 0; ci < 2; ci++) {
+        var cx = g.x0 + L * (0.50 + ci * 0.17);
+        ctx.fillStyle = "rgba(6,14,24,0.92)";
+        ctx.fillRect(cx - 1, -H * 0.42 - 1, Math.max(3, H * 0.11) + 2, H * 0.84 + 2);
+        ctx.fillStyle = "rgba(124,231,255,0.95)";
+        ctx.fillRect(cx, -H * 0.42, Math.max(3, H * 0.11), H * 0.84);
+      }
+    }
+
+    // 能量线：沿枪管中线一条，最后一截提亮，像光正往出光口走
+    var sh = Math.max(1, H * 0.09);
+    ctx.fillStyle = "rgba(124,231,255,0.95)";
+    ctx.fillRect(g.x0 + L * 0.40, -sh / 2, L * 0.34, sh);
+    ctx.fillStyle = "rgba(230,252,255,1)";
+    ctx.fillRect(g.x0 + L * 0.80, -sh * 0.9, L * 0.17, sh * 1.8);
+
+    if (muzzle > 0) {
+      ctx.beginPath();
+      ctx.arc(g.x0 + L, 0, 6 + muzzle * 56, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(200,245,255,0.85)";
+      ctx.fill();
+    }
+  }
+
+  // 一张脸：一对竖椭圆黑眼（里面一颗居中白眼球）+ 一张只上下弯的嘴
+  // 参考图里黑色是整颗眼，白是嵌在正中的眼球；颜色一个没换，换的是谁包着谁
+  var FACE = {
+    ex: 0.31,    // 眼睛横向偏移（× r）
+    ey: -0.07,   // 眼睛纵向偏移（没有嘴了，眼睛要往下挪回视觉中心）
+    rx: 0.165,   // 眼半宽
+    ry: 0.24,    // 眼半高（竖椭圆，高宽比 1.45）
+    wx: 0.44,    // 白眼球半宽（相对眼半宽）—— 越小黑边越厚
+    wy: 0.52,    // 白眼球半高
+    tx: 1.00,    // 白眼球横向行程（1 = 正好顶到黑边，黑边被压成背侧一片弯月）
+    ty: 0.85     // 白眼球纵向行程
+  };
+
+  // 眼：眼形本身就是裁切区——先裁竖椭圆，攻击态再交上一个半平面，
+  // 把"内上角"整块切掉，留下外上那个尖角，就是在瞪人
+  function drawEye(x, y, rx, ry, lx, ly, alpha, inner, cut, tilt) {
+    ctx.save();
+    ctx.translate(x, y);
+    if (tilt) ctx.rotate(tilt);
+
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    ctx.clip();
+
+    if (cut) {
+      var ax = inner * -1.05 * rx, ay = -1.15 * ry;   // 外侧上方（尖角那端）
+      var bx = inner * 1.10 * rx, by = 0.15 * ry;     // 内缘偏下
+      var dx = bx - ax, dy = by - ay;
+      var nx = -dy, ny = dx;                          // 法线
+      if (ny < 0) { nx = -nx; ny = -ny; }             // 统一朝下方（保留侧）
+      var m = Math.hypot(nx, ny) || 1, big = (rx + ry) * 4;
+      nx = nx / m * big; ny = ny / m * big;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.lineTo(bx + nx, by + ny);
+      ctx.lineTo(ax + nx, ay + ny);
+      ctx.closePath();
+      ctx.clip();
+    }
+
+    // 黑眼：铺满整个裁切区
+    ctx.fillStyle = "rgba(8,17,30," + alpha + ")";
+    ctx.fillRect(-rx * 1.4, -ry * 1.4, rx * 2.8, ry * 2.8);
+
+    // 白眼球：跟着视线走。行程 1.00/0.85——看定一个方向时白球顶到眼眶内壁，
+    // 黑边被压成背侧一片弯月、不再围成一圈，那才读作"在看某个方向"，
+    // 而不是一颗钉在正中的珠子
+    var wrx = rx * FACE.wx, wry = ry * FACE.wy;
+    ctx.beginPath();
+    ctx.ellipse(
+      clamp(lx, -1, 1) * (rx - wrx) * FACE.tx,
+      clamp(ly, -1, 1) * (ry - wry) * FACE.ty,
+      wrx, wry, 0, 0, Math.PI * 2
+    );
+    ctx.fillStyle = "rgba(238,252,255," + alpha + ")";
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // 只有眼睛，没有嘴。三种状态全落在眼形上：
+  // calm 平静 / sad 内眼角上挑 / angry 内上角被斜切
+  function drawFace(r, eye, alpha) {
+    var mood = (eye && eye.mood) || "calm";
+    var cut = mood === "angry";
+    var tilt = mood === "sad" ? 0.17 : 0;
+    var k = mood === "calm" ? 1 : 0.90;
+    var rx = r * FACE.rx, ry = r * FACE.ry * k;
+    var ox = r * FACE.ex, oy = r * FACE.ey;
+    var lx = eye ? eye.x : 0, ly = eye ? eye.y : 0;
+
+    drawEye(-ox, oy, rx, ry, lx, ly, alpha, 1, cut, tilt);
+    drawEye(ox, oy, rx, ry, lx, ly, alpha, -1, cut, -tilt);
+  }
+
+  // front = true 时枪画在本体之上、从球的左前方伸出，读作"端着"；
+  // 对局中仍用 false，枪托藏在球底下，让球的轮廓保持完整
+  function drawPawn(x, y, r, aim, alpha, recoil, muzzle, weaponId, glow, gsc, eye, front) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.beginPath();
+    ctx.arc(0, r * 0.28, r + 2, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 6, 0, Math.PI * 2);
+    ctx.fillStyle = glow ? "rgba(124,231,255,0.18)" : "rgba(124,231,255,0.14)";
+    ctx.fill();
+
+    // 侧视的枪只能靠镜像转身：直接转 180° 会把枪画倒（握把朝上）
+    var flip = Math.cos(aim) < 0 ? -1 : 1;
+
+    if (!front) {
+      ctx.save();
+      ctx.rotate(aim);
+      if (flip < 0) ctx.scale(1, -1);
+      drawGun(r, weaponId, recoil, muzzle, gsc);
+      ctx.restore();
+    }
+
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    var pg = ctx.createRadialGradient(-r * 0.28, -r * 0.35, 2, 0, 0, r + 2);
+    pg.addColorStop(0, "rgba(190,245,255," + alpha + ")");
+    pg.addColorStop(1, "rgba(60,150,220," + (alpha * 0.9) + ")");
+    ctx.fillStyle = pg;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(150,235,255," + (alpha * 0.9) + ")";
+    ctx.stroke();
+
+    if (front) {
+      ctx.save();
+      ctx.rotate(aim);
+      if (flip < 0) ctx.scale(1, -1);
+      ctx.translate(r * 0.72, 0);
+      drawGun(r, weaponId, recoil, muzzle, gsc, 0);
+      ctx.restore();
+    }
+
+    drawFace(r, eye, alpha);
+
+    ctx.restore();
+  }
+
+  function drawPlayer(p) {
+    var wmx = mouse.x + game.cam.x, wmy = mouse.y + game.cam.y;
+    var look = lookAt(p.x, p.y, wmx, wmy);
+    // 没有嘴，情绪全在眼睛上：开火瞪人，血量低内眼角上挑
+    var mood = p.combat > 0 ? "angry" : (p.hp / p.maxHp <= 0.35 ? "sad" : "calm");
+    var inv = p.invuln > 0 ? 0.35 : 1;
+    drawPawn(p.x, p.y, p.r, p.aim, inv, p.recoil, p.muzzle, WEAPONS[game.weapon].id,
+      false, 1, { x: look.x, y: look.y, mood: mood });
+
+    if (p.dashCd > 0) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r + 8, -Math.PI / 2, -Math.PI / 2 + (1 - p.dashCd / 1.25) * Math.PI * 2);
+      ctx.strokeStyle = "rgba(124,231,255,0.5)";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+  }
+
+  // 敌人的眼睛：白眼球 + 一道压下来的眉 + 一颗盯住正前方的瞳，一副瞪人的样子。
+  // 眉线是斜的：外侧只压掉上三分之一，内侧压到眼下——两条眉往中间聚，才叫怒。
+  // 不用另画眉毛：眉直接坐在眼球里，眼形本身就带着怒气，小尺寸下也不会多出一条糊线。
+  function drawEnemyEye(r, sx, sy, inner) {
+    var rx = Math.max(2.3, r * 0.21), ry = rx * 1.12;
+
+    // 眼窝：整颗眼先铺深色，被切掉的地方自然留成深色
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(10,16,26,0.88)";
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.clip();
+
+    // 斜线从外侧上方划到内缘偏下，切掉内上角
+    var ax = sx + inner * -1.10 * rx, ay = sy - 1.15 * ry;
+    var bx = sx + inner * 1.10 * rx, by = sy + ry * 0.45;
+    var dx = bx - ax, dy = by - ay;
+    var nx = -dy, ny = dx;
+    if (ny < 0) { nx = -nx; ny = -ny; }        // 法线统一朝下，保留下方那一半
+    var m = Math.hypot(nx, ny) || 1, big = (rx + ry) * 4;
+    nx = nx / m * big; ny = ny / m * big;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.lineTo(bx + nx, by + ny);
+    ctx.lineTo(ax + nx, ay + ny);
+    ctx.closePath();
+    ctx.clip();
+
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(248,252,255,0.95)";
+    ctx.fill();
+
+    // 瞳：压在眉下，盯着正前方
+    ctx.beginPath();
+    ctx.arc(sx, sy + ry * 0.30, Math.max(0.9, rx * 0.30), 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(12,20,32,0.92)";
+    ctx.fill();
+    ctx.restore();
+
+    // 眼形外圈一道细深色：受击白闪时靠它保住形状
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(8,14,24,0.72)";
+    ctx.lineWidth = Math.max(0.9, rx * 0.24);
+    ctx.stroke();
+  }
+
+  // ---------- 炮手 ----------
+  // 中距离压迫：不贴身，只在 240–420 的带里横移、蓄能、放一发弹。
+  // 它的全部威胁来自"你不敢停下来"——所以要给它一个看得见的起手式：
+  // 蓄能 0.75s（站桩 + 外圈走一圈）→ 0.55s 起瞄准线定死 → 再 0.2s 才发。
+  var GUNNER = {
+    near: 240, far: 420,
+    charge: 0.75,
+    lock: 0.55,
+    cdMin: 2.0, cdMax: 2.6,
+    speed: 430, r: 6, dmg: 18, life: 3.2
+  };
+
+  function countType(t) {
+    var n = 0;
+    for (var i = 0; i < game.enemies.length; i++) if (game.enemies[i].type === t) n++;
+    return n;
+  }
+
+  // 视口内：安全屋视野只有 2/3，看不见的地方不许开火
+  function onScreen(x, y, pad) {
+    var sx = x - game.cam.x, sy = y - game.cam.y;
+    return sx > -pad && sx < W + pad && sy > -pad && sy < H + pad;
+  }
+
+  // 视线：沿两点每 24px 采一次墙
+  function losClear(x1, y1, x2, y2) {
+    if (!game.walls.length) return true;
+    var n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 24);
+    for (var i = 1; i < n; i++) {
+      var k = i / n;
+      if (wallAt(x1 + (x2 - x1) * k, y1 + (y2 - y1) * k, 2)) return false;
+    }
+    return true;
+  }
+
+  function gunnerThink(e, p, dt, d, nx, ny) {
+    var seen = onScreen(e.x, e.y, 40) && losClear(e.x, e.y, p.x, p.y);
+    if (e.charge >= 0) {
+      e.charge += dt;
+      if (e.charge <= GUNNER.lock) e.aim = Math.atan2(p.y - e.y, p.x - e.x);
+      if (e.charge >= GUNNER.charge) {
+        fireFoe(e);
+        e.charge = -1;
+        e.fireCd = rand(GUNNER.cdMin, GUNNER.cdMax);
+      }
+      return;
+    }
+    e.fireCd -= dt;
+    if (e.fireCd > 0) return;
+    if (!seen || d < GUNNER.near || d > GUNNER.far + 60) { e.fireCd = 0.3; return; }
+    e.charge = 0;
+    e.aim = Math.atan2(p.y - e.y, p.x - e.x);
+  }
+
+  function fireFoe(e) {
+    var a = e.aim, c = Math.cos(a), s2 = Math.sin(a);
+    var mx = e.x + c * (e.r + 6), my = e.y + s2 * (e.r + 6);
+    game.foes.push({
+      x: mx, y: my,
+      vx: c * GUNNER.speed, vy: s2 * GUNNER.speed,
+      r: GUNNER.r, life: GUNNER.life, dmg: GUNNER.dmg, ang: a
+    });
+    burst(mx, my, "#ff8a3d", 5, 140);
+    game.shake = Math.min(game.shake + 2, 9);
+  }
+
+  // 敌弹画成菱形飞镖：玩家的子弹是圆点，靠形状区分敌我，不只靠颜色
+  function drawFoes() {
+    for (var i = 0; i < game.foes.length; i++) {
+      var f = game.foes[i];
+      var fc = f.side === "soldier" ? "255,77,141" : "255,138,61";
+      var fc2 = f.side === "soldier" ? "#ff4d8d" : "#ff8a3d";
+      ctx.beginPath();
+      ctx.moveTo(f.x - f.vx * 0.03, f.y - f.vy * 0.03);
+      ctx.lineTo(f.x, f.y);
+      ctx.strokeStyle = "rgba(" + fc + ",0.42)";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.ang);
+      ctx.beginPath();
+      ctx.moveTo(f.r * 1.25, 0);
+      ctx.lineTo(0, f.r * 0.78);
+      ctx.lineTo(-f.r * 0.9, 0);
+      ctx.lineTo(0, -f.r * 0.78);
+      ctx.closePath();
+      ctx.fillStyle = fc2;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(30,8,16,0.85)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // ---------- 敌军小队 ----------
+  // 三方混战：士兵打围城敌人，围城敌人也打士兵。
+  // 但士兵只在被围城敌人压到 220px 内 5 只以上时后撤——玩家贴脸不会让他们跑。
+  // 敌军专用的那道门：0=上 1=左 2=右
+  var SQUAD_GATE = 1;
+
+  var SOLDIER = {
+    detect: 380,          // 士兵的发现距离（比围城敌人的 500 更近）
+    raise: 0.35,          // 移动中举枪的时间：掩护位没有这个延迟
+    burstGap: 0.4 / 3,    // 组内 3 发在 0.4s 内出完
+    interBurst: 0.3,
+    ammo: 7,              // 一轮 7 发
+    cd: 0.5,              // 打完冷却
+    armor: 0.6,           // 围城敌人对士兵的伤害系数
+    nearR: 220,
+    nearN: 5,
+    boundLen: 300,
+    boundTime: 1.3,
+    boundMax: 2,
+    retreatCd: 5,
+    moveSpread: 0.0611    // 后撤中开火额外 +3.5°
+  };
+
+  // 士兵的两把枪：只给 AI，不进 WEAPONS（玩家装备页看不到）
+  var FOEGUN = {
+    al08: { dmg: 25, speed: 950, range: 800, r: 3.2, spread: 0.0227 },
+    al10: { dmg: 10, speed: 700, range: 600, r: 2.8, spread: 0.0227 }
+  };
+
+  // 发现：看得见 500、隔墙 150；士兵的眼更近
+  function sees(a, x, y) {
+    var d = Math.hypot(x - a.x, y - a.y);
+    var lim = a.type === "soldier" ? SOLDIER.detect : 500;
+    if (losClear(a.x, a.y, x, y)) return d < lim;
+    return d < 150;
+  }
+
+  // 敌人挑目标：玩家最优先（距离 ×0.75），其次是敌对阵营。
+  // 阵营只有两方：围城敌人 vs 士兵。**同阵营互不打**——
+  // 之前这里写成「跳过非士兵」，结果士兵把队友当目标，一召唤就互相开枪。
+  function pickTarget(e, p) {
+    var best = null, bd = 1e9;
+    if (sees(e, p.x, p.y)) {
+      best = { kind: "player", x: p.x, y: p.y, ref: p };
+      bd = Math.hypot(p.x - e.x, p.y - e.y) * 0.75;
+    }
+    var iAmSoldier = e.type === "soldier";
+    for (var i = 0; i < game.enemies.length; i++) {
+      var s2 = game.enemies[i];
+      if (s2 === e) continue;
+      // 士兵的敌人是围城敌人；围城敌人的敌人是士兵
+      if (iAmSoldier ? s2.type === "soldier" : s2.type !== "soldier") continue;
+      if (!sees(e, s2.x, s2.y)) continue;
+      var d = Math.hypot(s2.x - e.x, s2.y - e.y);
+      if (d < bd) { bd = d; best = { kind: iAmSoldier ? "foe" : "soldier", x: s2.x, y: s2.y, ref: s2 }; }
+    }
+    return best;
+  }
+
+  function nearWall(x, y, gap) {
+    for (var i = 0; i < game.walls.length; i++) {
+      if (circleHit(x, y, gap, game.walls[i])) return true;
+    }
+    return false;
+  }
+
+  // 掩体点：绕着目标撒 12 个点，优先「打得到 + 贴着墙」，再优先「离自己近」
+  function findCover(e, tx, ty, dist) {
+    var best = null, bestScore = -1e9;
+    for (var k = 0; k < 12; k++) {
+      var a = (k / 12) * Math.PI * 2 + e.wobble * 0.15;
+      var rr = dist + (k % 3) * 40;
+      var x = clamp(tx + Math.cos(a) * rr, 30, game.mapW - 30);
+      var y = clamp(ty + Math.sin(a) * rr, 30, game.mapH - 30);
+      if (wallAt(x, y, e.r + 2)) continue;
+      var sc = 0;
+      if (losClear(x, y, tx, ty)) sc += 40;
+      if (nearWall(x, y, 46)) sc += 35;
+      sc -= Math.hypot(x - e.x, y - e.y) * 0.04;
+      if (sc > bestScore) { bestScore = sc; best = { x: x, y: y }; }
+    }
+    return best || { x: e.x, y: e.y };
+  }
+
+  function squadMembers(sq) {
+    var out = [];
+    for (var i = 0; i < game.enemies.length; i++) {
+      var s2 = game.enemies[i];
+      if (s2.type === "soldier" && s2.squad === sq.id) out.push(s2);
+    }
+    return out;
+  }
+
+  // 一次后撤 = 1.3 秒，全员退到背离敌方重心 300px 的锚点；只有 1 人边退边打
+  function squadTick(sq, dt) {
+    var mem = squadMembers(sq);
+    if (!mem.length) { delete game.squads[sq.id]; return; }
+    if (sq.retreatCd > 0) sq.retreatCd = Math.max(0, sq.retreatCd - dt);
+
+    var lead = mem[0], cx = 0, cy = 0, near = 0;
+    for (var j = 0; j < game.enemies.length; j++) {
+      var o = game.enemies[j];
+      if (o.type === "soldier") continue;
+      if (dist2(o.x, o.y, lead.x, lead.y) < SOLDIER.nearR * SOLDIER.nearR) { near++; cx += o.x; cy += o.y; }
+    }
+    sq.near = near;
+
+    if (sq.state !== "retreat" && near >= SOLDIER.nearN && sq.retreatCd <= 0) {
+      if (sq.bounds <= 0) sq.bounds = SOLDIER.boundMax;
+      var vx = lead.x - cx / near, vy = lead.y - cy / near;
+      var m = Math.hypot(vx, vy) || 1;
+      sq.anchorX = clamp(lead.x + vx / m * SOLDIER.boundLen, 40, game.mapW - 40);
+      sq.anchorY = clamp(lead.y + vy / m * SOLDIER.boundLen, 40, game.mapH - 40);
+      sq.state = "retreat";
+      sq.retreatT = 0;
+      sq.mover = mem[0].uid;
+      for (var k = 0; k < mem.length; k++) if (mem[k].gun === "al08") sq.mover = mem[k].uid;
+    }
+
+    if (sq.state === "retreat") {
+      sq.retreatT += dt;
+      if (sq.retreatT >= SOLDIER.boundTime) {
+        sq.state = "advance";
+        sq.bounds--;
+        sq.retreatCd = sq.bounds > 0 ? 0.2 : SOLDIER.retreatCd;
+      }
+    }
+  }
+
+  // 三人按队形出生：[横向, 沿门轴向里]，前二后一，不撒随机数。
+  // 横向要按门的朝向算——左边的门，"并排"是上下站，不是左右站。
+  var SQUAD_FORM = [[-30, 0], [30, 0], [0, 34]];
+
+  function spawnSquad(point, rank) {
+    var id = ++game.squadSeq;
+    game.squads[id] = {
+      id: id, state: "advance", bounds: SOLDIER.boundMax, retreatCd: 0,
+      retreatT: 0, anchorX: 0, anchorY: 0, mover: 0, near: 0
+    };
+    var ax = point.ix || 0, ay = point.iy === undefined ? 1 : point.iy;   // 进门方向（注意 iy 可能是 0，不能用 || 兜底）
+    var px = -ay, py = ax;                          // 垂直于门的横向
+    var depth = 22 + (rank || 0) * 46;              // 往里站多远；多队依次错开
+    var bx = point.x + ax * depth, by = point.y + ay * depth;
+    for (var i = 0; i < 3; i++) {
+      spawnEnemy("soldier", {
+        x: bx + px * SQUAD_FORM[i][0] + ax * SQUAD_FORM[i][1],
+        y: by + py * SQUAD_FORM[i][0] + ay * SQUAD_FORM[i][1]
+      }, { squad: id, gun: i === 0 ? "al08" : "al10", exact: true });
+    }
+    return id;
+  }
+
+  function soldierShoot(e, ang, gun) {
+    var c = Math.cos(ang), s2 = Math.sin(ang);
+    var mx = e.x + c * (e.r + 6), my = e.y + s2 * (e.r + 6);
+    game.foes.push({
+      x: mx, y: my, vx: c * gun.speed, vy: s2 * gun.speed,
+      r: gun.r, life: gun.range / gun.speed, dmg: gun.dmg, ang: ang,
+      side: "soldier"
+    });
+    e.muzzle = 0.07;
+    burst(mx, my, "#ffd0e2", 2, 80);
+  }
+
+  function soldierThink(e, dt, p, tgt) {
+    var sq = game.squads[e.squad];
+    var gun = FOEGUN[e.gun] || FOEGUN.al10;
+    e.cd = Math.max(0, (e.cd || 0) - dt);
+    e.gap = Math.max(0, (e.gap || 0) - dt);
+    e.raiseT = Math.max(0, (e.raiseT || 0) - dt);
+    e.coverT = (e.coverT || 0) - dt;
+    e.muzzle = Math.max(0, (e.muzzle || 0) - dt);
+
+    var retreating = sq && sq.state === "retreat";
+    var tx, ty;
+    if (retreating) { tx = sq.anchorX; ty = sq.anchorY; }
+    else if (tgt) {
+      if (e.coverT <= 0 || e.coverX === undefined) {
+        var c = findCover(e, tgt.x, tgt.y, 240);
+        e.coverX = c.x; e.coverY = c.y; e.coverT = 1.2;
+      }
+      tx = e.coverX; ty = e.coverY;
+    } else { tx = p.x; ty = p.y; }
+
+    var ddx = tx - e.x, ddy = ty - e.y, dd = Math.hypot(ddx, ddy) || 1;
+
+    // 离目标点还远就先走 BFS 路点（会绕墙），最后一段再直着靠过去
+    if (!retreating && dd > 120) {
+      var nt = navTarget(e);
+      if (nt) { ddx = nt.x - e.x; ddy = nt.y - e.y; dd = Math.hypot(ddx, ddy) || 1; }
+    }
+    var speed = e.speed * (retreating ? 2.6 : 1);
+    var mvx = 0, mvy = 0;
+    if (dd > 14) { mvx = ddx / dd * speed; mvy = ddy / dd * speed; }
+
+    // 分离力，别叠在一起
+    for (var i = 0; i < game.enemies.length; i++) {
+      var o = game.enemies[i];
+      if (o === e) continue;
+      var ox = e.x - o.x, oy = e.y - o.y, od = Math.hypot(ox, oy);
+      if (od > 0 && od < e.r + o.r) {
+        mvx += ox / od * (e.r + o.r - od) * 2.2;
+        mvy += oy / od * (e.r + o.r - od) * 2.2;
+      }
+    }
+
+    if (e.emerge > 0) { mvx *= 0.35; mvy *= 0.35; }
+
+    // 举枪硬直：只有「正在移动」的士兵才有，掩护位（站定）没有。
+    // 必须站稳 0.25s 以上再起步才重新武装 —— 否则被挤得逐帧抖动时永远举不完枪
+    var moving = mvx * mvx + mvy * mvy > 36;
+    e.stillT = (e.stillT || 0);
+    if (moving) {
+      if (e.stillT > 0.25) { e.raiseT = SOLDIER.raise; e.stillT = 0; }
+    } else { e.stillT += dt; }
+
+    moveCircle(e, mvx * dt, mvy * dt, false);
+    if (e.blockX || e.blockY) { e.coverT = 0; e.wobble += 0.6; }
+
+    // 开火：看得见、在射程内、不在举枪硬直里
+    if (tgt) e.aim = Math.atan2(tgt.y - e.y, tgt.x - e.x);
+    var dist = tgt ? Math.hypot(tgt.x - e.x, tgt.y - e.y) : 1e9;
+    var canFire = !!tgt && dist <= gun.range && losClear(e.x, e.y, tgt.x, tgt.y);
+    if (retreating && sq.mover !== e.uid) canFire = false;
+    if (e.raiseT > 0) canFire = false;
+
+    if (canFire && e.cd <= 0 && e.gap <= 0) {
+      if (e.ammo === undefined) { e.ammo = SOLDIER.ammo; e.burstIn = 3; }
+      var sp = gun.spread + (retreating ? SOLDIER.moveSpread : 0);
+      soldierShoot(e, e.aim + rand(-sp, sp), gun);
+      e.ammo--;
+      e.burstIn--;
+      if (e.ammo <= 0) { e.ammo = SOLDIER.ammo; e.burstIn = 3; e.cd = SOLDIER.cd; e.gap = SOLDIER.cd; }
+      else if (e.burstIn <= 0) { e.burstIn = 3; e.gap = SOLDIER.interBurst; }
+      else { e.gap = SOLDIER.burstGap; }
+    }
+  }
+
+  // 关卡表：10、15、20… 每 5 关一次；队数每 10 关 +1
+  function squadsForLevel(lv) {
+    if (!isHouse() || lv < 10 || lv % 5 !== 0) return 0;
+    return 1 + Math.floor((lv - 10) / 10);
+  }
+
+  function drawEnemy(e) {
+    var sc = e.emerge > 0 ? 1 - (e.emerge / 0.45) * 0.6 : 1;
+    var al = e.emerge > 0 ? 1 - (e.emerge / 0.45) * 0.55 : 1;
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.scale(sc, sc);
+    ctx.globalAlpha = al;
+
+    ctx.beginPath();
+    ctx.arc(0, 5, e.r + 2, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fill();
+
+    // 士兵的枪先画，让球体盖住枪身——只露出枪管，跟主角同一个道理
+    if (e.type === "soldier") {
+      ctx.save();
+      ctx.rotate(e.aim || 0);
+      drawGun(e.r * 1.05, e.gun || "al10", 0, (e.muzzle || 0) > 0 ? 0.05 : 0, 1.05, e.r * 0.70);
+      ctx.restore();
+    }
+
+    var base = e.hurt > 0 ? "#ffffff" : e.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, e.r, 0, Math.PI * 2);
+    var eg = ctx.createRadialGradient(-e.r * 0.3, -e.r * 0.35, 1, 0, 0, e.r + 1);
+    eg.addColorStop(0, e.glow);
+    eg.addColorStop(1, base);
+    ctx.fillStyle = eg;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255,255,255,0.22)";
+    ctx.stroke();
+
+    if (e.type === "soldier") {
+      // 士兵不画眼睛，画一条护目镜：其他敌人都是"眼睛球"，一眼就能把这一种分出来
+      ctx.beginPath();
+      ctx.roundRect(-e.r * 0.64, -e.r * 0.40, e.r * 1.28, e.r * 0.40, e.r * 0.18);
+      ctx.fillStyle = "rgba(12,18,30,0.92)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.roundRect(-e.r * 0.52, -e.r * 0.31, e.r * 1.04, e.r * 0.16, e.r * 0.08);
+      ctx.fillStyle = "rgba(255,208,226,0.95)";
+      ctx.fill();
+    } else {
+      drawEnemyEye(e.r, -e.r * 0.33, -e.r * 0.06, 1);
+      drawEnemyEye(e.r, e.r * 0.33, -e.r * 0.06, -1);
+    }
+
+    if (e.type === "soldier") {
+      ctx.save();
+      ctx.rotate(e.aim || 0);
+      drawGun(e.r * 0.9, e.gun || "al10", 0, (e.muzzle || 0) > 0 ? 0.05 : 0, 0.9);
+      ctx.restore();
+    }
+
+    // 蓄能环：外圈走一圈就是全部预告，走满即发
+    if (e.type === "gunner" && e.charge >= 0) {
+      var cp = clamp(e.charge / GUNNER.charge, 0, 1);
+      ctx.beginPath();
+      ctx.arc(0, 0, e.r + 7, -Math.PI / 2, -Math.PI / 2 + cp * Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,138,61," + (0.5 + cp * 0.45) + ")";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // 锁定后半段才出瞄准线：线一出现，就说明"别站着了"
+      if (e.charge > GUNNER.lock) {
+        var la = (e.charge - GUNNER.lock) / (GUNNER.charge - GUNNER.lock);
+        var ca = Math.cos(e.aim), sa = Math.sin(e.aim);
+        ctx.beginPath();
+        ctx.moveTo(ca * (e.r + 8), sa * (e.r + 8));
+        ctx.lineTo(ca * 620, sa * 620);
+        ctx.strokeStyle = "rgba(255,138,61," + (0.10 + la * 0.22) + ")";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    if (e.hp < e.maxHp) {
+      var w = e.r * 2;
+      var barY = -e.r - (e.type === "gunner" ? 14 : 9);   // 炮手上方要留出蓄能环
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(-w / 2, barY, w, 4);
+      ctx.fillStyle = "#ff5b5b";
+      ctx.fillRect(-w / 2, barY, w * (e.hp / e.maxHp), 4);
+      if (e.r > 20) {
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-w / 2 - 0.5, barY - 0.5, w + 1, 5);
+      }
+    }
+    ctx.restore();
+  }
+
+  // hover ∈ 0..1：停在可点元素上时准星张开，跟卡片提亮同步
+  function drawCrosshair(hover) {
+    ctx.save();
+    ctx.translate(mouse.x, mouse.y);
+    ctx.strokeStyle = "rgba(140,235,255,0.9)";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(0, 0, 9 + 3 * (hover || 0), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-16, 0); ctx.lineTo(-6, 0);
+    ctx.moveTo(16, 0); ctx.lineTo(6, 0);
+    ctx.moveTo(0, -16); ctx.lineTo(0, -6);
+    ctx.moveTo(0, 16); ctx.lineTo(0, 6);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(140,235,255,0.9)";
+    ctx.fillRect(-1.5, -1.5, 3, 3);
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    var p = game.player;
+    var bw = 244, bh = 14, bx = 24, by = 24;
+
+    ctx.fillStyle = C.panel;
+    ctx.fillRect(bx, by, bw, bh);
+    var hpr = clamp(p.hp / p.maxHp, 0, 1);
+    var hg = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    if (hpr > 0.35) { hg.addColorStop(0, "#2ee6a8"); hg.addColorStop(1, "#8ff7d0"); }
+    else { hg.addColorStop(0, "#ff3b3b"); hg.addColorStop(1, "#ff9b6b"); }
+    ctx.fillStyle = hg;
+    ctx.fillRect(bx, by, bw * hpr, bh);
+    ctx.strokeStyle = C.line;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+
+    ctx.font = "600 12px " + C.mono;
+    ctx.fillStyle = C.text2;
+    ctx.textAlign = "left";
+    ctx.fillText("HP " + Math.max(0, Math.ceil(p.hp)) + " / " + p.maxHp, bx, by + bh + 18);
+
+    // 当前武器与射击模式：切换时整行亮一下，M 键才不是盲按
+    var wHud = WEAPONS[game.weapon], mHud = fireModeOf(wHud);
+    var hot = p.modeFlash > 0;
+    ctx.font = "600 13px " + C.mono;
+    ctx.fillStyle = hot ? C.player : "rgba(150,190,225,0.75)";
+    ctx.fillText(wHud.cn + " · " + mHud.cn, bx, by + bh + 38);
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = "rgba(150,190,225," + (hot ? 0.95 : 0.62) + ")";
+    ctx.fillText((wHud.modes.length > 1 ? "M 切换" : "固定模式") + " · R 换弹", bx, by + bh + 55);
+
+    // 弹药条：换弹时变成橙色进度，平时是剩余比例
+    var ay = by + bh + 66;
+    var reloading = game.reloadT > 0;
+    var ammoNow = game.ammo[game.weapon] || 0;
+    var ar = reloading ? 1 - game.reloadT / game.reloadTime : ammoNow / wHud.mag;
+    ctx.fillStyle = "rgba(255,255,255,0.09)";
+    ctx.fillRect(bx, ay, bw, 4);
+    ctx.fillStyle = reloading
+      ? "rgba(255,184,107,0.9)"
+      : (ammoNow < wHud.mag * 0.1 ? "rgba(255,107,107,0.9)" : "rgba(140,235,255,0.8)");
+    ctx.fillRect(bx, ay, bw * clamp(ar, 0, 1), 4);
+
+    ctx.font = "500 11px " + C.mono;
+    ctx.fillStyle = reloading ? "rgba(255,200,150,0.95)" : "rgba(150,190,225,0.75)";
+    ctx.fillText(reloading
+      ? "换弹 " + game.reloadT.toFixed(1) + "s"
+      : "弹药 " + ammoNow + " / " + wHud.mag, bx, ay + 16);
+
+    ctx.textAlign = "right";
+    ctx.font = "700 26px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(String(game.score).padStart(5, "0"), W - 24, 46);
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = C.text2;
+    if (game.mode === "classic") {
+      ctx.fillText("WAVE " + pad2(game.wave) + "   KILLS " + game.kills, W - 24, 66);
+    } else {
+      ctx.fillText("LEVEL " + pad2(game.level) + "   KILLS " + game.kills +
+        "   LEFT " + pad2(game.spawnQueue.length + game.enemies.length), W - 24, 66);
+    }
+
+    if (game.bannerTime > 0) {
+      var a = Math.min(1, game.bannerTime / 0.4);
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.textAlign = "center";
+      ctx.font = "800 52px " + C.mono;
+      ctx.fillStyle = C.text;
+      ctx.fillText(game.banner, W / 2, H * 0.24);
+      ctx.font = "500 13px " + C.mono;
+      ctx.fillStyle = "rgba(150,200,235,0.85)";
+      ctx.fillText(game.mode === "solo" ? "SAFEHOUSE" : (game.mode === "blitz" ? "BLITZ" : "ENEMIES INCOMING"), W / 2, H * 0.24 + 26);
+      ctx.restore();
+    }
+  }
+
+  // ---------- 菜单 ----------
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
+
+  // ---------- 界面动效 ----------
+  // 每个可交互元素一个 { h, p }：悬停 / 按下各自的进度，0..1
+  // 用 pow(remain, dt) 逼近目标 —— 临界阻尼、不过冲，也不违反"不用缓动曲线"的约定
+  var UI_ANIM = Object.create(null);
+  var ANIM_K = 1e-5;          // 1 秒后只剩这么多：约 0.087s 走完 63%
+  var PAGE_T = 0.14;          // 换页淡入时长（线性）
+
+  function animOf(id) {
+    var a = UI_ANIM[id];
+    if (!a) a = UI_ANIM[id] = { h: 0, p: 0 };
+    return a;
+  }
+
+  // 菜单与暂停时推进这些进度；对局中不跑，省掉每帧的无效计算
+  function uiStep(dt) {
+    var k = Math.pow(ANIM_K, dt);
+    for (var i = 0; i < game.ui.length; i++) {
+      var u = game.ui[i], a = animOf(u.id);
+      a.h += ((game.hoverId === u.id ? 1 : 0) - a.h) * (1 - k);
+      a.p += ((game.pressId === u.id ? 1 : 0) - a.p) * (1 - k);
+      if (a.h < 0.001) a.h = 0;
+      if (a.p < 0.001) a.p = 0;
+    }
+    if (game.pageT < 1) game.pageT = Math.min(1, game.pageT + dt / PAGE_T);
+  }
+
+  function hoverAmt() {
+    var m = 0;
+    for (var i = 0; i < game.ui.length; i++) {
+      var a = animOf(game.ui[i].id);
+      if (a.h > m) m = a.h;
+    }
+    return m;
+  }
+
+  // 按下时整块缩一点，绕自身中心缩放，文字跟着一起缩——手感才像真的按下去
+  function withPress(u, fn) {
+    var a = animOf(u.id);
+    var sc = 1 - 0.03 * a.p;
+    if (sc > 0.999) { fn(a); return; }
+    ctx.save();
+    ctx.translate(u.x + u.w / 2, u.y + u.h / 2);
+    ctx.scale(sc, sc);
+    ctx.translate(-(u.x + u.w / 2), -(u.y + u.h / 2));
+    fn(a);
+    ctx.restore();
+  }
+
+  // 卡片底：选中描边用主角色；悬停 / 按下按进度提亮
+  // 顶部一条 1px 受光边，和墙体同源——让卡片读成"有厚度的板"，而不是一块半透明色块
+  function cardBg(u, on) {
+    var a = animOf(u.id);
+    var f0 = on ? 0.10 : 0.09, fh = on ? 0.14 : 0.13, fp = 0.19;
+    var fa = f0 + (fh - f0) * a.h;
+    fa += (fp - fa) * a.p;
+
+    roundRect(u.x, u.y, u.w, u.h, 10);
+    ctx.fillStyle = on
+      ? "rgba(124,231,255," + fa.toFixed(3) + ")"
+      : "rgba(255,255,255," + fa.toFixed(3) + ")";
+    ctx.fill();
+
+    roundRect(u.x + 0.5, u.y + 0.5, u.w - 1, u.h - 1, 10);
+    ctx.strokeStyle = on ? C.player : "rgba(255,255,255," + (0.18 + 0.17 * a.h + 0.13 * a.p).toFixed(3) + ")";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255," + (0.09 + 0.05 * a.h).toFixed(3) + ")";
+    ctx.fillRect(u.x + 12, u.y + 1.5, u.w - 24, 1);
+  }
+
+  // 选中标记：装备卡与模式卡同一种点——长得一样的东西，选中的表示法也必须一样
+  function drawSelDot(u, on) {
+    ctx.beginPath();
+    ctx.arc(u.x + u.w - 22, u.y + 22, 4.5, 0, Math.PI * 2);
+    if (on) { ctx.fillStyle = C.player; ctx.fill(); }
+    else { ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.lineWidth = 1.4; ctx.stroke(); }
+  }
+
+  function drawTitleBlock() {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "#eef8ff";
+    ctx.font = "800 62px " + C.mono;
+    ctx.letterSpacing = "0.12em";
+    ctx.fillText("方寸-围城", 48, 48);
+    ctx.letterSpacing = "0.30em";
+    ctx.font = "500 15px " + C.mono;
+    ctx.fillStyle = "rgba(160,205,240,0.85)";
+    ctx.fillText("INCH SIEGE", 50, 126);
+    ctx.letterSpacing = "0.08em";
+    ctx.font = "500 13px " + C.mono;
+    ctx.fillStyle = "rgba(160,205,240,0.85)";
+    ctx.fillText("方寸之内，退无可退。", 49, 156);
+    ctx.letterSpacing = "0px";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  // 子页标题：与首页标题同一处落笔，只降一号
+  function drawPageTitle(cn, en) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "#eef8ff";
+    ctx.font = "800 44px " + C.mono;
+    ctx.letterSpacing = "0.10em";
+    ctx.fillText(cn, 48, 46);
+    ctx.letterSpacing = "0.28em";
+    ctx.font = "500 13px " + C.mono;
+    ctx.fillStyle = "rgba(160,205,240,0.8)";
+    ctx.fillText(en, 50, 100);
+    ctx.letterSpacing = "0px";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  function drawBackBtn() {
+    var u = uiById("backHome");
+    if (!u) return;
+    withPress(u, function (a) {
+      cardBg(u, false);
+      ctx.textAlign = "center";
+      ctx.font = "600 13px " + C.mono;
+      ctx.fillStyle = a.h > 0.02 ? C.player : "rgba(190,215,240,0.85)";
+      ctx.fillText("← 返回", u.x + u.w / 2, u.y + 26);
+    });
+  }
+
+  // 首页入口按钮：中文名 + 英文名 + 当前取值，右端一个尖角箭头
+  function drawNavButton(u, cn, en, value) {
+    withPress(u, function (a) {
+      cardBg(u, false);
+      ctx.textAlign = "left";
+      ctx.font = "600 18px " + C.mono;
+      ctx.fillStyle = C.text;
+      ctx.fillText(cn, u.x + 20, u.y + 33);
+      ctx.font = "500 10px " + C.mono;
+      ctx.fillStyle = C.text2;
+      ctx.letterSpacing = "0.18em";
+      ctx.fillText(en, u.x + 21, u.y + 52);
+      ctx.letterSpacing = "0px";
+      ctx.font = "600 12px " + C.mono;
+      ctx.fillStyle = "rgba(124,231,255," + (0.72 + 0.28 * a.h).toFixed(3) + ")";
+      ctx.fillText(value, u.x + 20, u.y + 72);
+
+      // 箭头随悬停前移 3px：手没动也能看出"这里能进去"
+      var ax = u.x + u.w - 20 + 3 * a.h;
+      ctx.strokeStyle = "rgba(" + Math.round(255 - 131 * a.h) + ",255,255," + (0.30 + 0.70 * a.h).toFixed(3) + ")";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(ax - 6, u.y + u.h / 2 - 5);
+      ctx.lineTo(ax, u.y + u.h / 2);
+      ctx.lineTo(ax - 6, u.y + u.h / 2 + 5);
+      ctx.stroke();
+    });
+  }
+
+  function drawHome(t) {
+    drawTitleBlock();
+
+    // 主角：正中偏上。枪固定指向左下（端枪姿势，不跟鼠标转），只有眼珠朝鼠标
+    var cx = W / 2, cy = H / 2 - 28;
+    var hr = clamp(Math.min(W, H) * 0.068, 36, 58);
+    var look = lookAt(cx, cy, mouse.x, mouse.y);
+
+    // 端着枪会累：两个低频正弦叠一起，身体微微起伏、枪口轻轻漂
+    // 单一频率看起来像机械振动，两个互质频率才像呼吸
+    var sway = Math.sin(t * 1.15) * 0.68 + Math.sin(t * 0.53 + 1.2) * 0.32;
+    var bob = Math.sin(t * 1.15 + 0.6) * 0.030;
+
+    drawPawn(cx, cy + bob * hr, hr, HOME_AIM + sway * 0.055, 1, 0, 0,
+      WEAPONS[game.weapon].id, true, 1.9,
+      { x: look.x, y: look.y, mood: "calm" }, true);
+
+    var a = uiById("toEquip"), b = uiById("toMode");
+    if (a) drawNavButton(a, "装备选择", "EQUIPMENT", WEAPONS[game.weapon].cn);
+    var mi = 0;
+    for (var mm = 0; mm < MODES.length; mm++) if (MODES[mm].id === game.mode) mi = mm;
+    if (b) drawNavButton(b, "模式选择", "MODE", MODES[mi].cn);
+  }
+
+  function drawEquip() {
+    game.equipScroll = clamp(game.equipScroll, 0, equipScrollMax());
+    drawPageTitle("装备选择", "EQUIPMENT");
+    drawBackBtn();
+
+    var g = equipGeom();
+    if (g.vertical) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, g.top, W, g.viewH);
+      ctx.clip();
+    }
+    for (var i = 0; i < WEAPONS.length; i++) {
+      var r = equipRect(g, i);
+      if (r.y > g.bottom || r.y + r.h < g.top) continue;
+      drawWeaponCard({ x: r.x, y: r.y, w: r.w, h: r.h, id: "weapon" + i }, WEAPONS[i], i);
+    }
+    if (g.vertical) ctx.restore();
+
+    if (g.vertical && g.contentH > g.viewH) drawEquipScrollbar(g);
+    drawFooter(g.vertical ? "滚轮翻看 · 点击卡片切换 · Esc 返回" : "点击卡片切换装备 · Esc 返回");
+  }
+
+  function drawWeaponCard(u, wp, idx) {
+    var on = game.weapon === idx;
+    withPress(u, function (a) {
+    cardBg(u, on);
+
+    // 枪械预览：按整把枪的包围盒居中（含枪托），与游戏里同一套图元
+    var r = 34, sc = u.w > 300 ? 2.15 : 1.85;
+    var sp = gunSpan(r, wp.id, sc);
+    ctx.save();
+    ctx.translate(u.x + u.w / 2 - (sp.min + sp.max) / 2, u.y + 62);
+    drawGun(r, wp.id, 0, 0, sc);
+    ctx.restore();
+
+    ctx.textAlign = "left";
+    ctx.font = "700 17px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(wp.cn, u.x + 18, u.y + 118);
+    ctx.font = "500 9px " + C.mono;
+    ctx.fillStyle = on ? C.player : C.text2;
+    ctx.letterSpacing = "0.16em";
+    ctx.fillText(wp.en, u.x + 19, u.y + 133);
+    ctx.letterSpacing = "0px";
+
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(u.x + 18, u.y + 145, u.w - 36, 1);
+
+    var rows = [
+      ["伤害", String(wp.dmg)],
+      ["间隔", (wp.cd < 0.1 ? wp.cd.toFixed(3) : wp.cd.toFixed(2)) + "s"],
+      ["散布", (wp.spread * 180 / Math.PI).toFixed(1) + "°"],
+      ["弹速", String(wp.speed)],
+      ["射程", wp.range + "px"],
+      ["弹夹", String(wp.mag)]
+    ];
+    for (var i = 0; i < rows.length; i++) {
+      var ry = u.y + 166 + i * 22;
+      ctx.textAlign = "left";
+      ctx.font = "500 11px " + C.mono;
+      ctx.fillStyle = "rgba(160,190,215,0.78)";
+      ctx.fillText(rows[i][0], u.x + 18, ry);
+      ctx.textAlign = "right";
+      ctx.font = "600 11px " + C.mono;
+      ctx.fillStyle = on ? C.player : C.text;
+      ctx.fillText(rows[i][1], u.x + u.w - 18, ry);
+    }
+    ctx.textAlign = "left";
+    drawSelDot(u, on);
+    });
+  }
+
+  function drawMode() {
+    drawPageTitle("模式选择", "MODE");
+    drawBackBtn();
+    for (var i = 0; i < MODES.length; i++) {
+      var u = uiById("mode" + i);
+      if (u) drawModeCard(u, MODES[i]);
+    }
+    var s = uiById("start");
+    if (s) drawStartBtn(s);
+    drawFooter("WASD 移动 · 鼠标瞄准 · 左键射击 · Shift 冲刺 · Esc 暂停");
+  }
+
+  // 页脚提示：与左右边距同一套 48px 安全线，不贴着屏幕边
+  function drawFooter(text) {
+    ctx.textAlign = "center";
+    ctx.font = "500 12px " + C.mono;
+    ctx.fillStyle = "rgba(150,190,225,0.66)";
+    ctx.fillText(text, W / 2, H - 48);
+  }
+
+  // 模式卡照装备卡的版式来：上面一张示意图，下面型号 + 三行数值，同一套位置
+  function drawModeMap(cx, cy, id) {
+    var house = id !== "classic";
+    var w = house ? 148 : 96, h = 62;
+    var x = cx - w / 2, y = cy - h / 2;
+
+    // 地图框
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(140,190,225,0.45)";
+    ctx.strokeRect(x, y, w, h);
+
+    if (!house) {
+      // 经典：地图 = 一屏 = 视野，四面来敌
+      var m = 9;
+      ctx.strokeStyle = "rgba(255,91,91,0.55)";
+      ctx.lineWidth = 1.5;
+      var arr = [[x + w / 2, y - m, 0, 1], [x + w / 2, y + h + m, 0, -1],
+                 [x - m, y + h / 2, 1, 0], [x + w + m, y + h / 2, -1, 0]];
+      for (var i = 0; i < arr.length; i++) {
+        var ax = arr[i][0], ay = arr[i][1], dx = arr[i][2], dy = arr[i][3];
+        ctx.beginPath();
+        ctx.moveTo(ax - dx * 7, ay - dy * 7);
+        ctx.lineTo(ax, ay);
+        ctx.stroke();
+      }
+    } else {
+      // 安全屋：1.5 屏地图 + 2/3 屏视野 + 三个门
+      var vw = w * 0.62, vh = h * 0.62;
+      var vx = x + (w - vw) / 2, vy = y + (h - vh) / 2;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = "rgba(124,231,255,0.55)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(vx, vy, vw, vh);
+      ctx.setLineDash([]);
+
+      // 三处入口：上、左、右（左边那道是敌军专用，画品红）
+      var gx = [x + w / 2, x, x + w], gy = [y, y + h / 2, y + h / 2];
+      for (var k = 0; k < 3; k++) {
+        ctx.fillStyle = (k === 1) ? "rgba(255,77,141,0.85)" : "rgba(255,91,91,0.75)";
+        if (k === 0) ctx.fillRect(gx[k] - 9, gy[k] - 1.5, 18, 3);
+        else ctx.fillRect(gx[k] - (k === 1 ? 1.5 : 0), gy[k] - 9, 3, 18);
+      }
+
+      // 玩家
+      ctx.beginPath();
+      ctx.arc(x + w / 2, y + h * 0.68, 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = C.player;
+      ctx.fill();
+
+      // 快速：三组小箭头表示"涌入更急"
+      if (id === "blitz") {
+        ctx.strokeStyle = "rgba(255,209,102,0.85)";
+        ctx.lineWidth = 1.2;
+        for (var q = 0; q < 3; q++) {
+          ctx.beginPath();
+          ctx.moveTo(x + 18 + q * 5, y + h - 10);
+          ctx.lineTo(x + 22 + q * 5, y + h - 14);
+          ctx.lineTo(x + 18 + q * 5, y + h - 18);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  function drawModeCard(u, m) {
+    var on = game.mode === m.id;
+    withPress(u, function () {
+    cardBg(u, on);
+
+    drawModeMap(u.x + u.w / 2, u.y + 62, m.id);
+
+    ctx.textAlign = "left";
+    ctx.font = "700 17px " + C.mono;
+    ctx.fillStyle = C.text;
+    ctx.fillText(m.cn, u.x + 18, u.y + 118);
+    ctx.font = "500 9px " + C.mono;
+    ctx.fillStyle = on ? C.player : C.text2;
+    ctx.letterSpacing = "0.16em";
+    ctx.fillText(m.en, u.x + 19, u.y + 133);
+    ctx.letterSpacing = "0px";
+
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(u.x + 18, u.y + 145, u.w - 36, 1);
+
+    var rows = m.id === "classic"
+      ? [["地图", "一屏"], ["视野", "全图"], ["节奏", "无尽波次"]]
+      : (m.id === "blitz"
+        ? [["地图", "1.5 屏"], ["视野", "2/3 屏"], ["节奏", "五倍刷新"]]
+        : [["地图", "1.5 屏"], ["入口", "三处"], ["节奏", "逐关推进"]]);
+    for (var i = 0; i < rows.length; i++) {
+      var ry = u.y + 166 + i * 22;
+      ctx.textAlign = "left";
+      ctx.font = "500 11px " + C.mono;
+      ctx.fillStyle = "rgba(160,190,215,0.78)";
+      ctx.fillText(rows[i][0], u.x + 18, ry);
+      ctx.textAlign = "right";
+      ctx.font = "600 11px " + C.mono;
+      ctx.fillStyle = on ? C.player : C.text;
+      ctx.fillText(rows[i][1], u.x + u.w - 18, ry);
+    }
+    ctx.textAlign = "left";
+    drawSelDot(u, on);
+    });
+  }
+
+  function drawStartBtn(u) {
+    withPress(u, function (a) {
+      var lit = Math.max(a.h, a.p);
+      roundRect(u.x, u.y, u.w, u.h, 10);
+      ctx.fillStyle = "rgba(124,231,255," + (0.13 + 0.09 * a.h + 0.08 * a.p).toFixed(3) + ")";
+      ctx.fill();
+      roundRect(u.x + 0.5, u.y + 0.5, u.w - 1, u.h - 1, 10);
+      ctx.strokeStyle = "rgba(124,231,255," + (0.55 + 0.40 * lit).toFixed(3) + ")";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255," + (0.12 + 0.06 * a.h).toFixed(3) + ")";
+      ctx.fillRect(u.x + 14, u.y + 1.5, u.w - 28, 1);
+
+      ctx.textAlign = "center";
+      ctx.font = "700 18px " + C.mono;
+      ctx.fillStyle = "#eaf6ff";
+      ctx.fillText("开始游戏", u.x + u.w / 2, u.y + 31);
+      ctx.font = "500 10px " + C.mono;
+      ctx.letterSpacing = "0.26em";
+      ctx.fillStyle = "rgba(160,220,245," + (0.85 + 0.15 * lit).toFixed(3) + ")";
+      ctx.fillText("START", u.x + u.w / 2, u.y + 49);
+      ctx.letterSpacing = "0px";
+    });
+  }
+
+  // 换页不做位移，只做"材料到位"：透明度 + 轻微放大，方向中性，来回都不会有方向错觉
+  function drawMenu(t) {
+    ctx.fillStyle = "rgba(5,8,14,0.78)";
+    ctx.fillRect(0, 0, W, H);
+
+    var e = game.pageT;
+    if (e < 1) {
+      ctx.save();
+      ctx.globalAlpha = e;
+      var k = 0.982 + 0.018 * e;
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(k, k);
+      ctx.translate(-W / 2, -H / 2);
+    }
+    if (game.screen === "equip") drawEquip();
+    else if (game.screen === "mode") drawMode();
+    else drawHome(t);
+    if (e < 1) ctx.restore();
+
+    drawCrosshair(hoverAmt());
+  }
+
+  function drawOverlay() {
+    if (game.state === "paused") {
+      ctx.fillStyle = "rgba(5,8,14,0.70)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#eef8ff";
+      ctx.font = "800 44px " + C.mono;
+      ctx.fillText("已暂停", W / 2, H / 2 - 44);
+      ctx.font = "500 14px " + C.mono;
+      ctx.fillStyle = "rgba(160,205,240,0.8)";
+      ctx.fillText("按 Esc 继续", W / 2, H / 2 - 6);
+
+      var b = uiById("exitRun");
+      if (b) withPress(b, function (a) {
+        var lit = Math.max(a.h, a.p);
+        roundRect(b.x, b.y, b.w, b.h, 10);
+        ctx.fillStyle = "rgba(255," + Math.round(255 - 164 * lit) + "," + Math.round(255 - 164 * lit) +
+          "," + (0.07 + 0.15 * lit).toFixed(3) + ")";
+        ctx.fill();
+        roundRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1, 10);
+        ctx.strokeStyle = "rgba(255," + Math.round(91 + 29 * lit) + "," + Math.round(91 + 29 * lit) + "," + (0.34 + 0.51 * lit).toFixed(3) + ")";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.font = "600 15px " + C.mono;
+        ctx.fillStyle = lit > 0.5 ? "#ffb9b9" : "rgba(255,150,150,0.92)";
+        ctx.fillText("退出本局", b.x + b.w / 2, b.y + 22);
+        ctx.font = "500 10px " + C.mono;
+        ctx.letterSpacing = "0.20em";
+        ctx.fillStyle = "rgba(255," + Math.round(140 + 30 * lit) + "," + Math.round(140 + 30 * lit) + "," + (0.55 + 0.35 * lit).toFixed(3) + ")";
+        ctx.fillText("ABANDON RUN", b.x + b.w / 2, b.y + 38);
+        ctx.letterSpacing = "0px";
+      });
+    } else if (game.state === "over") {
+      ctx.fillStyle = "rgba(10,4,6,0.82)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ff6b6b";
+      ctx.font = "800 56px " + C.mono;
+      ctx.fillText("阵　亡", W / 2, H / 2 - 70);
+
+      ctx.fillStyle = "#eef8ff";
+      ctx.font = "700 30px " + C.mono;
+      ctx.fillText("得分 " + game.score, W / 2, H / 2 - 10);
+
+      ctx.font = "500 14px " + C.mono;
+      ctx.fillStyle = "rgba(170,200,225,0.85)";
+      var line = game.mode === "classic"
+        ? "坚持 " + game.wave + " 波 · 击杀 " + game.kills + " · 存活 " + game.timeAlive.toFixed(1) + " 秒"
+        : "到达 " + game.level + " 关 · 击杀 " + game.kills + " · 存活 " + game.timeAlive.toFixed(1) + " 秒";
+      ctx.fillText(line, W / 2, H / 2 + 22);
+
+      ctx.font = "600 16px " + C.mono;
+      ctx.fillStyle = "rgba(140,235,255,0.95)";
+      ctx.globalAlpha = 0.55 + Math.sin(performance.now() / 320) * 0.45;
+      ctx.fillText("点击或按 R 重新开始 · Esc 返回", W / 2, H / 2 + 68);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function render(t) {
+    var sx = 0, sy = 0;
+    if (game.shake > 0.2) {
+      sx = rand(-game.shake, game.shake) * 0.3;
+      sy = rand(-game.shake, game.shake) * 0.3;
+    }
+
+    drawBackground(t);
+
+    if (game.state !== "menu") {
+      ctx.save();
+      ctx.translate(-game.cam.x + sx, -game.cam.y + sy);
+
+      drawWalls();
+      drawThresholds();
+
+      for (var i = 0; i < game.pickups.length; i++) {
+        var pk = game.pickups[i];
+        var bob = Math.sin(pk.phase) * 3;
+        ctx.save();
+        ctx.translate(pk.x, pk.y + bob);
+        ctx.beginPath();
+        ctx.arc(0, 0, pk.r + 6, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(93,242,160,0.14)";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(0, 0, pk.r, 0, Math.PI * 2);
+        ctx.fillStyle = C.gain;
+        ctx.fill();
+        ctx.fillStyle = "rgba(6,30,18,0.9)";
+        ctx.fillRect(-1.8, -6, 3.6, 12);
+        ctx.fillRect(-6, -1.8, 12, 3.6);
+        ctx.restore();
+      }
+
+      for (var j = 0; j < game.particles.length; j++) {
+        var pt = game.particles[j];
+        ctx.globalAlpha = clamp(pt.life / pt.maxLife, 0, 1);
+        ctx.fillStyle = pt.color;
+        ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+      }
+      ctx.globalAlpha = 1;
+
+      for (var k = 0; k < game.bullets.length; k++) {
+        var b = game.bullets[k];
+        var tl = Math.hypot(b.vx, b.vy) || 1;
+        var ux = b.vx / tl, uy = b.vy / tl;
+        ctx.beginPath();
+        ctx.moveTo(b.x - ux * 20, b.y - uy * 20);
+        ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = "rgba(160,240,255,0.55)";
+        ctx.lineWidth = 3;
+        ctx.lineCap = "round";
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(b.x - ux * 12, b.y - uy * 12);
+        ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = "rgba(235,252,255,0.95)";
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+
+      for (var m = 0; m < game.enemies.length; m++) drawEnemy(game.enemies[m]);
+
+      drawFoes();
+
+      if (game.player && game.state !== "over") drawPlayer(game.player);
+
+      ctx.restore();
+    }
+
+    if (game.hitFlash > 0) {
+      var vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.25, W / 2, H / 2, Math.max(W, H) * 0.72);
+      vg.addColorStop(0, "rgba(255,0,0,0)");
+      vg.addColorStop(1, "rgba(255,0,0," + (game.hitFlash * 0.45) + ")");
+      ctx.fillStyle = vg;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    var vg2 = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.85);
+    vg2.addColorStop(0, "rgba(0,0,0,0)");
+    vg2.addColorStop(1, "rgba(0,0,0,0.55)");
+    ctx.fillStyle = vg2;
+    ctx.fillRect(0, 0, W, H);
+
+    if (game.state === "menu") {
+      drawMenu(t);
+    } else {
+      drawHUD();
+      drawOverlay();
+      drawCrosshair(game.state === "paused" ? hoverAmt() : 0);   // 准星永远在最上层，暂停时也不被遮罩压暗
+    }
+  }
+
+  // ---------- 输入 ----------
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code.indexOf("Arrow") === 0) e.preventDefault();
+    keys[e.code] = true;
+
+    if (e.code === "Escape") {
+      if (game.state === "over") { backToMenu(); return; }
+      if (game.state === "menu") {
+        if (game.screen !== "home") { game.screen = "home"; game.hoverId = null; game.pageT = 0; menuLayout(); }
+        return;
+      }
+      togglePause();
+      return;
+    }
+
+    if (game.state === "menu") {
+      if (e.code === "Enter" || e.code === "Space") {
+        if (game.screen === "mode") startRun();
+        else if (game.screen === "equip") { game.screen = "home"; game.pageT = 0; menuLayout(); }
+        else { game.screen = "mode"; game.hoverId = null; game.pageT = 0; menuLayout(); }
+      }
+      return;
+    }
+
+    if (e.code === "KeyM" && (game.state === "playing" || game.state === "paused")) {
+      cycleFireMode();
+      return;
+    }
+
+    if (e.code === "KeyR") {
+      if (game.state === "over") { startRun(); return; }
+      if (game.state === "playing" || game.state === "paused") { startReload(); return; }
+    }
+  });
+
+  window.addEventListener("keyup", function (e) { keys[e.code] = false; });
+
+  canvas.addEventListener("mousemove", function (e) {
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+    if (game.state === "menu" || game.state === "paused") {
+      var it = hitUi(mouse.x, mouse.y);
+      game.hoverId = it ? it.id : null;
+    } else {
+      game.hoverId = null;
+    }
+  });
+
+  // 按下只高亮，抬起且仍在同一块上才提交——按下就有反馈，滑走可以反悔
+  canvas.addEventListener("mousedown", function (e) {
+    if (e.button !== 0) return;
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+    mouse.down = true;
+
+    if (game.state === "menu" || game.state === "paused") {
+      var it = hitUi(mouse.x, mouse.y);
+      game.hoverId = it ? it.id : null;
+      game.pressId = it ? it.id : null;
+      return;
+    }
+    if (game.state === "over") startRun();
+  });
+
+  window.addEventListener("mouseup", function (e) {
+    if (e.button !== 0) return;
+    mouse.down = false;
+    var id = game.pressId;
+    game.pressId = null;
+    if (!id || (game.state !== "menu" && game.state !== "paused")) return;
+    var it = hitUi(mouse.x, mouse.y);
+    if (it && it.id === id) act(it);
+  });
+
+  window.addEventListener("blur", function () {
+    mouse.down = false;
+    game.pressId = null;
+    keys = Object.create(null);
+  });
+  canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  // 装备页纵向滚动（只在窄屏的纵向排法下有效）
+  canvas.addEventListener("wheel", function (e) {
+    if (game.state !== "menu" || game.screen !== "equip") return;
+    var max = equipScrollMax();
+    if (max <= 0) return;
+    e.preventDefault();
+    game.equipScroll = clamp(game.equipScroll + e.deltaY, 0, max);
+    menuLayout();
+  }, { passive: false });
+
+  // ---------- 主循环 ----------
+  resize();
+  menuLayout();
+  var last = performance.now();
+  var clock = 0;
+
+  function loop(now) {
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    clock += dt;
+
+    if (game.state === "playing") update(dt);
+    else if (game.state === "menu" || game.state === "paused") uiStep(dt);
+    render(clock);
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+(function () {
+  var f = render;
+  render = function (t) {
+    if (game.screen !== 'equip') { game.screen = 'equip'; menuLayout(); game.pageT = 1; }
+    game.equipScroll = 0; menuLayout();
+    mouse.x = W * 0.5; mouse.y = H * 0.1;
+    f(t);
+  };
+})();
+})();
+</script>
+</body>
+</html>
