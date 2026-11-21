@@ -102,7 +102,7 @@
       modes: [
         { id: "auto",  cn: "连发",   spread: 0.020 },
         { id: "semi",  cn: "单发",   spread: 0.0122 },
-        { id: "burst", cn: "三连发", spread: 0.0166, burst: 3, gap: 0.4 / 3 }
+        { id: "burst", cn: "三连发", spread: 0.0166, burst: 3, gap: 0.4 / 3, cd: 0.25 }
       ] }
   ];
 
@@ -127,6 +127,7 @@
     weapon: 2,          // 默认 AL-11（下标 2）；前面是 AL-08 / AL-10，别让人一上来就拿弱枪
     fireMode: [0, 0, 0, 0, 0],  // 每把枪各自记住上次选的模式
     equipScroll: 0,          // 装备页纵向滚动量（窗口窄时启用）
+    ammo: 5000, ammoMax: 5000, reloadT: 0,   // 激光弹夹：5000 发，换弹 0.8s
     squads: Object.create(null),
     squadSeq: 0,
     uidSeq: 0,
@@ -569,6 +570,8 @@
 
   // ---------- 开局 ----------
   function startRun() {
+    game.ammo = game.ammoMax;
+    game.reloadT = 0;
     game.state = "playing";
     game.hoverId = null;
     game.player = makePlayer();
@@ -765,6 +768,12 @@
   }
 
   // M 键：在可用模式里循环。换模式时清掉没打完的一组，免得下一组接着吐
+  function startReload() {
+    if (game.reloadT > 0 || game.ammo >= game.ammoMax) return;
+    game.reloadT = 0.8;
+    if (game.player) game.player.burstLeft = 0;   // 换弹时把没打完的一组清掉
+  }
+
   function cycleFireMode() {
     var w = WEAPONS[game.weapon];
     if (w.modes.length < 2) return;
@@ -779,6 +788,8 @@
 
   function shoot(p) {
     var w = WEAPONS[game.weapon];
+    if (game.ammo <= 0) return;
+    game.ammo--;
     var sp = fireModeOf(w).spread;
     var ang = p.aim + rand(-sp, sp);
     var mx = p.x + Math.cos(p.aim) * (p.r + 6);
@@ -874,6 +885,14 @@
 
     var wNow = WEAPONS[game.weapon];
     var mNow = fireModeOf(wNow);
+    var cdNow = mNow.cd !== undefined ? mNow.cd : wNow.cd;
+
+    // 换弹：0.8s，期间不能开火，也不会被开火打断
+    if (game.reloadT > 0) {
+      game.reloadT -= dt;
+      if (game.reloadT <= 0) { game.reloadT = 0; game.ammo = game.ammoMax; }
+    }
+    var canPull = game.reloadT <= 0 && game.ammo > 0;
 
     // 一组连发按节奏吐完。冷却从**最后一发**开始算——
     // 若从第一发就开始算，0.15s 的冷却在组内就跑完了，下一组会直接接上，
@@ -884,11 +903,17 @@
         shoot(p);
         p.burstLeft--;
         if (p.burstLeft > 0) p.burstT += mNow.gap;
-        else p.fireCd = wNow.cd;
+        else p.fireCd = cdNow;
       }
     }
 
-    if (mouse.down && p.fireCd <= 0 && game.state === "playing") {
+    // 打空了还在扣扳机：自动开始换弹（否则按左键没反应，像卡住了）
+    if (mouse.down && p.fireCd <= 0 && game.ammo <= 0 && game.reloadT <= 0 &&
+        game.state === "playing" && p.burstLeft <= 0) {
+      startReload();
+    }
+
+    if (mouse.down && p.fireCd <= 0 && canPull && game.state === "playing") {
       if (mNow.burst > 1) {
         if (p.trigger || wNow.holdBurst) {
           // 上一组还没吐完就按下的，这一下直接丢掉：
@@ -901,11 +926,11 @@
         }
       } else if (mNow.id === "auto") {
         shoot(p);
-        p.fireCd = wNow.cd;
+        p.fireCd = cdNow;
       } else if (p.trigger) {
         p.trigger = false;
         shoot(p);
-        p.fireCd = wNow.cd;
+        p.fireCd = cdNow;
       }
     }
 
@@ -2053,7 +2078,24 @@
     ctx.fillText(wHud.cn + " · " + mHud.cn, bx, by + bh + 38);
     ctx.font = "500 12px " + C.mono;
     ctx.fillStyle = "rgba(150,190,225," + (hot ? 0.95 : 0.62) + ")";
-    ctx.fillText(wHud.modes.length > 1 ? "M 切换" : "固定模式", bx, by + bh + 55);
+    ctx.fillText((wHud.modes.length > 1 ? "M 切换" : "固定模式") + " · R 换弹", bx, by + bh + 55);
+
+    // 弹药条：换弹时变成橙色进度，平时是剩余比例
+    var ay = by + bh + 66;
+    var reloading = game.reloadT > 0;
+    var ar = reloading ? 1 - game.reloadT / 0.8 : game.ammo / game.ammoMax;
+    ctx.fillStyle = "rgba(255,255,255,0.09)";
+    ctx.fillRect(bx, ay, bw, 4);
+    ctx.fillStyle = reloading
+      ? "rgba(255,184,107,0.9)"
+      : (game.ammo < game.ammoMax * 0.1 ? "rgba(255,107,107,0.9)" : "rgba(140,235,255,0.8)");
+    ctx.fillRect(bx, ay, bw * clamp(ar, 0, 1), 4);
+
+    ctx.font = "500 11px " + C.mono;
+    ctx.fillStyle = reloading ? "rgba(255,200,150,0.95)" : "rgba(150,190,225,0.75)";
+    ctx.fillText(reloading
+      ? "换弹 " + game.reloadT.toFixed(1) + "s"
+      : "弹药 " + game.ammo + " / " + game.ammoMax, bx, ay + 16);
 
     ctx.textAlign = "right";
     ctx.font = "700 26px " + C.mono;
@@ -2704,7 +2746,10 @@
       return;
     }
 
-    if (e.code === "KeyR" && game.state === "over") { startRun(); return; }
+    if (e.code === "KeyR") {
+      if (game.state === "over") { startRun(); return; }
+      if (game.state === "playing" || game.state === "paused") { startReload(); return; }
+    }
   });
 
   window.addEventListener("keyup", function (e) { keys[e.code] = false; });
